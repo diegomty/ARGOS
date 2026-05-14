@@ -1,0 +1,542 @@
+"""Q-Sentinel — Servidor FastAPI + WebSocket para la Fase E.
+
+Arquitectura: un único proceso. El listener UDP corre en un thread
+daemon; cada `SentinelEvent` que produce se serializa a JSON y se
+broadcastea por WebSocket a todos los clientes conectados.
+
+Ejecutar:
+    python server.py
+    # → frontend en  http://<ip-local>:8000
+    # → websocket en ws://<ip-local>:8000/ws
+"""
+
+import asyncio
+import threading
+from collections import deque
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Deque, List, Optional
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+from Sentinel import iniciar_q_sentinel
+from core import topology as topology_mod
+from core.events import SentinelEvent
+from core.flowlistener import FlowListener
+from core.storage import Storage
+from core.topology import Topology
+
+# Persistencia: SQLite WAL en `qsentinel.db`. Se inicializa al import,
+# antes de que arranque el listener, para que los esquemas existan.
+storage = Storage()
+
+
+# Topología cargada una sola vez al startup. Si falla la carga, el
+# resto del servidor (listener, WS, dashboard) sigue funcionando y
+# `/api/topology` responde 503 hasta que se arregle el YAML.
+_topology: Topology | None = None
+_topology_error: str | None = None
+try:
+    _topology = topology_mod.load()
+    print(
+        f"[server] topología cargada: {_topology.name} v{_topology.version} "
+        f"({len(_topology.nodes)} nodos, {len(_topology.links)} links)",
+        flush=True,
+    )
+except Exception as e:  # FileNotFoundError, ValueError, yaml.YAMLError, …
+    _topology_error = f"{type(e).__name__}: {e}"
+    print(f"[server] WARNING: no se pudo cargar topology.yaml — {_topology_error}", flush=True)
+
+
+# El historial sirve para que un cliente que se conecta tarde a la demo
+# vea los últimos eventos de contexto en lugar de una pantalla muerta.
+HISTORIAL_MAX = 100
+
+
+class ConnectionManager:
+    """Gestiona el conjunto de WS clientes + estadísticas + estado del lab.
+
+    Los mensajes que envía siguen un envelope `{kind, payload}`:
+      * `kind="event"` → SentinelEvent serializado (pipeline original)
+      * `kind="topology_state"` → cambio en `isolated_segments`
+    """
+
+    def __init__(self) -> None:
+        self.active: List[WebSocket] = []
+        self.history: Deque[dict] = deque(maxlen=HISTORIAL_MAX)
+        self.total_eventos = 0
+        self.total_anomalias = 0
+        self.ips_bloqueadas: List[str] = []
+        # Conjunto de node_ids de la topología que están aislados (subif
+        # en `shutdown`). El frontend lo refleja con tinte gris + halo rojo.
+        self.isolated_segments: set[str] = set()
+        self._lock = asyncio.Lock()
+
+    async def connect(self, ws: WebSocket) -> None:
+        await ws.accept()
+        async with self._lock:
+            self.active.append(ws)
+            # 1) Reproduce historial de eventos para que la UI no se vea muerta
+            for msg in self.history:
+                try:
+                    await ws.send_json(msg)
+                except Exception:
+                    break
+            # 2) Estado actual de aislamiento — para que pestañas tardías
+            #    pinten correctamente los nodos que ya están "shutdown".
+            try:
+                await ws.send_json({
+                    "kind": "topology_state",
+                    "payload": {"isolated": sorted(self.isolated_segments)},
+                })
+            except Exception:
+                pass
+
+    async def disconnect(self, ws: WebSocket) -> None:
+        async with self._lock:
+            if ws in self.active:
+                self.active.remove(ws)
+
+    def record_event(self, payload: dict) -> None:
+        """Actualiza contadores agregados a partir de un SentinelEvent."""
+        self.total_eventos += 1
+        if payload.get("is_anomaly"):
+            self.total_anomalias += 1
+        if payload.get("blocked") and payload.get("attacker_ip"):
+            ip = payload["attacker_ip"]
+            if ip not in self.ips_bloqueadas:
+                self.ips_bloqueadas.append(ip)
+
+    async def broadcast(self, msg: dict) -> None:
+        """Envía un envelope `{kind, payload}` a todos los clientes vivos."""
+        async with self._lock:
+            self.history.append(msg)
+            muertos: List[WebSocket] = []
+            for ws in self.active:
+                try:
+                    await ws.send_json(msg)
+                except Exception:
+                    muertos.append(ws)
+            for ws in muertos:
+                self.active.remove(ws)
+
+
+manager = ConnectionManager()
+
+# Hidratamos contadores con los totales históricos de la DB. Sin esto,
+# tras un restart el dashboard mostraría "0 eventos" hasta que llegue
+# tráfico nuevo, dando una falsa sensación de pérdida de datos.
+try:
+    _persisted = storage.stats()
+    manager.total_eventos = _persisted["total_events"]
+    manager.total_anomalias = _persisted["total_anomalies"]
+    print(
+        f"[server] storage hidratado: {_persisted['total_events']} eventos "
+        f"({_persisted['total_anomalies']} anomalías) ya en DB",
+        flush=True,
+    )
+except Exception as e:
+    print(f"[server] WARNING: no se pudo hidratar contadores desde DB — {e}", flush=True)
+
+
+_flow_listener: Optional[FlowListener] = None
+
+
+def _arrancar_flow_listener(loop: asyncio.AbstractEventLoop) -> Optional[FlowListener]:
+    """Lanza el listener NetFlow UDP/2055 en un thread daemon.
+
+    Para cada flujo: enriquece con info de topología, persiste en SQLite,
+    y lo broadcastea por WS como `kind: "flow"` para alimentar la
+    animación del digital twin.
+    """
+
+    def on_flow(flow: dict) -> None:
+        # Enriquecer con info de la topología — si la IP cae en algún
+        # segmento conocido, anexamos el node_id del depto correspondiente.
+        if _topology is not None:
+            src_dept = _topology.department_for_ip(flow["src_ip"])
+            dst_dept = _topology.department_for_ip(flow["dst_ip"])
+            flow["src_node"] = src_dept.id if src_dept else None
+            flow["dst_node"] = dst_dept.id if dst_dept else None
+        else:
+            flow["src_node"] = None
+            flow["dst_node"] = None
+
+        try:
+            storage.save_flow(flow)
+        except Exception as e:
+            print(f"[storage] save_flow ERROR: {e}", flush=True)
+
+        # Solo difundimos flujos cuyos endpoints mapean a la topología —
+        # los del propio R1 hacia sí mismo no aportan a la viz.
+        if flow["src_node"] and flow["dst_node"] and flow["src_node"] != flow["dst_node"]:
+            asyncio.run_coroutine_threadsafe(
+                manager.broadcast({"kind": "flow", "payload": flow}),
+                loop,
+            )
+
+    listener = FlowListener(host="0.0.0.0", port=2055)
+    listener.start(on_flow)
+    print("[server] listener NetFlow arrancado en thread daemon", flush=True)
+    return listener
+
+
+def _arrancar_listener(loop: asyncio.AbstractEventLoop) -> threading.Thread:
+    """Lanza el listener UDP en un thread daemon.
+
+    El callback `on_event` se invoca desde un contexto sync; usamos
+    `run_coroutine_threadsafe` para reinyectar el broadcast en el event
+    loop asyncio del proceso principal.
+    """
+
+    def on_event(ev: SentinelEvent) -> None:
+        payload = ev.to_dict()
+        # Persistimos ANTES de broadcastear: si el lock de SQLite tarda un
+        # par de ms, prefiero retraso de UI a perder el evento de la DB.
+        try:
+            storage.save_event(payload)
+        except Exception as e:  # nunca romper el listener por la DB
+            print(f"[storage] save_event ERROR: {e}", flush=True)
+        manager.record_event(payload)
+        asyncio.run_coroutine_threadsafe(
+            manager.broadcast({"kind": "event", "payload": payload}),
+            loop,
+        )
+
+    thread = threading.Thread(
+        target=iniciar_q_sentinel,
+        kwargs={"on_event": on_event},
+        daemon=True,
+        name="q-sentinel-listener",
+    )
+    thread.start()
+    print("[server] listener UDP arrancado en thread daemon", flush=True)
+    return thread
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _flow_listener
+    loop = asyncio.get_running_loop()
+    _arrancar_listener(loop)
+    _flow_listener = _arrancar_flow_listener(loop)
+    yield
+    if _flow_listener is not None:
+        _flow_listener.stop()
+
+
+app = FastAPI(title="Q-Sentinel", version="1.4.0", lifespan=lifespan)
+
+
+@app.get("/api/health")
+async def health() -> dict:
+    return {"status": "ok", "version": "1.4.0"}
+
+
+@app.get("/api/history")
+async def get_history(
+    since: Optional[float] = None,
+    limit: int = 200,
+    anomaly_only: bool = False,
+) -> JSONResponse:
+    """Histórico de eventos persistidos en SQLite.
+
+    * `since`         — Unix epoch seconds. Solo eventos con `received_at >= since`.
+    * `limit`         — máximo a devolver (default 200, hard cap 5000).
+    * `anomaly_only`  — si true, solo `is_anomaly=1`.
+    """
+    capped = max(1, min(int(limit), 5000))
+    try:
+        rows = storage.query_events(since=since, limit=capped, anomaly_only=anomaly_only)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    return JSONResponse({"count": len(rows), "events": rows})
+
+
+@app.get("/api/timeseries")
+async def get_timeseries(
+    since: Optional[float] = None,
+    bucket: int = 60,
+) -> JSONResponse:
+    """Timeseries agregada por bucket — feed para el chart del dashboard.
+
+    Por defecto buckets de 60s (1 punto por minuto). Cada bucket trae
+    avg/max/min de entropía y conteos total/anomalía.
+    """
+    capped_bucket = max(1, min(int(bucket), 3600))
+    try:
+        rows = storage.query_timeseries(since=since, bucket_seconds=capped_bucket)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    return JSONResponse({"bucket_seconds": capped_bucket, "points": rows})
+
+
+@app.get("/api/flows")
+async def get_flows(
+    since: Optional[float] = None,
+    limit: int = 200,
+    protocol: Optional[int] = None,
+) -> JSONResponse:
+    """Histórico de flujos NetFlow persistidos.
+
+    * `since`     — Unix epoch seconds.
+    * `limit`     — máximo a devolver (default 200, hard cap 5000).
+    * `protocol`  — filtro por número IANA (1=icmp, 6=tcp, 17=udp).
+    """
+    capped = max(1, min(int(limit), 5000))
+    try:
+        rows = storage.query_flows(since=since, limit=capped, protocol_num=protocol)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    extra: dict = {}
+    if _flow_listener is not None:
+        extra["listener_stats"] = _flow_listener.stats()
+    return JSONResponse({"count": len(rows), "flows": rows, **extra})
+
+
+@app.get("/api/isolation-history")
+async def get_isolation_history(since: Optional[float] = None, limit: int = 100) -> JSONResponse:
+    """Histórico de acciones manuales aislar/reactivar — auditoría."""
+    capped = max(1, min(int(limit), 1000))
+    try:
+        rows = storage.query_isolation_log(since=since, limit=capped)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    return JSONResponse({"count": len(rows), "actions": rows})
+
+
+@app.get("/api/topology")
+async def get_topology() -> JSONResponse:
+    """Devuelve el modelo lógico de la red para el renderer 3D.
+
+    503 si `topology.yaml` no se pudo cargar al startup.
+    """
+    if _topology is None:
+        return JSONResponse(
+            {"error": "topology not loaded", "detail": _topology_error},
+            status_code=503,
+        )
+    return JSONResponse(_topology.to_dict())
+
+
+@app.get("/api/stats")
+async def stats() -> dict:
+    return {
+        "total_eventos": manager.total_eventos,
+        "total_anomalias": manager.total_anomalias,
+        "ips_bloqueadas": manager.ips_bloqueadas,
+        "clientes_conectados": len(manager.active),
+    }
+
+
+@app.post("/api/test-event")
+async def test_event() -> JSONResponse:
+    """Inyecta un evento sintético — útil para verificar el WS sin lab."""
+    from datetime import datetime
+
+    fake = SentinelEvent(
+        timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+        raw_message="<188>SYNTHETIC: SEC-6-IPACCESSLOGP from 10.0.0.99",
+        source_ip="127.0.0.1",
+        entropy=5.42,
+        sha3="a" * 64,
+        is_trusted=False,
+        is_anomaly=True,
+        attacker_ip="10.0.0.99",
+        plan="A",
+        blocked=True,
+        response_log=["[!] synthetic test event"],
+    )
+    await _persist_record_and_broadcast(fake.to_dict())
+    return JSONResponse({"injected": True})
+
+
+async def _persist_record_and_broadcast(payload: dict) -> None:
+    """Punto único para emitir un SentinelEvent: persiste, contabiliza, broadcastea.
+
+    Lo usan tanto `/api/test-event` como `_broadcast_responder_log`. El
+    listener real tiene su propia copia inline porque corre desde un
+    thread sync y necesita `run_coroutine_threadsafe`.
+    """
+    try:
+        storage.save_event(payload)
+    except Exception as e:
+        print(f"[storage] save_event ERROR: {e}", flush=True)
+    manager.record_event(payload)
+    await manager.broadcast({"kind": "event", "payload": payload})
+
+
+# --- Aislamiento de segmentos (Fase G: touch-to-isolate) ---
+
+# Tipos de nodo que pueden ser aislados desde la UI. El resto (router,
+# switch, sentinel, host individual) se rechaza en `/api/isolate`.
+ISOLATABLE_TYPES = {"department", "external"}
+
+
+def _resolve_isolatable(node_id: str):
+    """Devuelve `(node, error_response)` — uno y solo uno será None."""
+    if _topology is None:
+        return None, JSONResponse(
+            {"error": "topology not loaded", "detail": _topology_error},
+            status_code=503,
+        )
+    node = _topology.node(node_id)
+    if not node:
+        return None, JSONResponse({"error": f"node {node_id!r} no existe"}, status_code=404)
+    if node.type.value not in ISOLATABLE_TYPES:
+        return None, JSONResponse(
+            {"error": f"nodo de tipo {node.type.value!r} no es aislable",
+             "isolatable_types": sorted(ISOLATABLE_TYPES)},
+            status_code=400,
+        )
+    if not node.interface:
+        return None, JSONResponse(
+            {"error": f"nodo {node_id!r} no tiene interfaz declarada en topology.yaml"},
+            status_code=400,
+        )
+    return node, None
+
+
+@app.get("/api/isolated")
+async def get_isolated() -> dict:
+    """Lista los node_ids aislados actualmente."""
+    return {"isolated": sorted(manager.isolated_segments)}
+
+
+@app.post("/api/isolate")
+async def isolate(req: dict) -> JSONResponse:
+    """Aplica `shutdown` al subif del nodo y marca el segmento como aislado."""
+    node_id = (req or {}).get("node_id")
+    if not node_id:
+        return JSONResponse({"error": "node_id requerido"}, status_code=400)
+
+    node, err = _resolve_isolatable(node_id)
+    if err:
+        return err
+
+    log_lines: List[str] = []
+    from core.responder import aislar_segmento
+    ok = aislar_segmento(node.label, node.interface, on_log=log_lines.append)
+
+    # Auditamos siempre — incluso intentos fallidos quedan en la DB
+    # para forensia posterior.
+    try:
+        storage.save_isolation(node_id, node.interface, "isolate", ok, log_lines)
+    except Exception as e:
+        print(f"[storage] save_isolation ERROR: {e}", flush=True)
+
+    if ok:
+        manager.isolated_segments.add(node_id)
+        await manager.broadcast({
+            "kind": "topology_state",
+            "payload": {"isolated": sorted(manager.isolated_segments)},
+        })
+        # También enviamos los comandos SSH como un "evento" sintético para
+        # que aparezcan en el panel de consola SSH del dashboard.
+        await _broadcast_responder_log(
+            f"AISLAMIENTO MANUAL: {node.label}",
+            node.label,
+            log_lines,
+        )
+
+    return JSONResponse(
+        {"success": ok, "node_id": node_id, "interface": node.interface, "log": log_lines},
+        status_code=200 if ok else 502,
+    )
+
+
+@app.post("/api/unisolate")
+async def unisolate(req: dict) -> JSONResponse:
+    """Reverso de `/api/isolate` — `no shutdown` del subif."""
+    node_id = (req or {}).get("node_id")
+    if not node_id:
+        return JSONResponse({"error": "node_id requerido"}, status_code=400)
+
+    node, err = _resolve_isolatable(node_id)
+    if err:
+        return err
+
+    log_lines: List[str] = []
+    from core.responder import reactivar_segmento
+    ok = reactivar_segmento(node.label, node.interface, on_log=log_lines.append)
+
+    try:
+        storage.save_isolation(node_id, node.interface, "unisolate", ok, log_lines)
+    except Exception as e:
+        print(f"[storage] save_isolation ERROR: {e}", flush=True)
+
+    if ok:
+        manager.isolated_segments.discard(node_id)
+        await manager.broadcast({
+            "kind": "topology_state",
+            "payload": {"isolated": sorted(manager.isolated_segments)},
+        })
+        await _broadcast_responder_log(
+            f"REACTIVACION MANUAL: {node.label}",
+            node.label,
+            log_lines,
+        )
+
+    return JSONResponse(
+        {"success": ok, "node_id": node_id, "interface": node.interface, "log": log_lines},
+        status_code=200 if ok else 502,
+    )
+
+
+async def _broadcast_responder_log(title: str, label: str, log_lines: List[str]) -> None:
+    """Empaqueta los comandos SSH ejecutados como un SentinelEvent sintético.
+
+    De esta forma el panel "Consola SSH" del dashboard refleja también
+    las acciones manuales del operador, no solo las automáticas.
+    """
+    from datetime import datetime
+
+    fake = SentinelEvent(
+        timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+        raw_message=f"<MANUAL> {title}",
+        source_ip="127.0.0.1",
+        entropy=0.0,
+        sha3="m" * 64,
+        is_trusted=True,
+        is_anomaly=False,
+        attacker_ip=None,
+        plan="NONE",
+        blocked=False,
+        response_log=log_lines,
+    )
+    await _persist_record_and_broadcast(fake.to_dict())
+
+
+@app.websocket("/ws")
+async def ws_endpoint(ws: WebSocket) -> None:
+    await manager.connect(ws)
+    print(
+        f"[server] cliente WS conectado ({len(manager.active)} activo/s)",
+        flush=True,
+    )
+    try:
+        while True:
+            # Drenamos los mensajes del cliente para mantener la conexión
+            # viva; el protocolo es de un solo sentido (server → cliente).
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        await manager.disconnect(ws)
+        print(
+            f"[server] cliente WS desconectado ({len(manager.active)} activo/s)",
+            flush=True,
+        )
+
+
+# Servimos el frontend estático desde el mismo proceso. El mount va
+# DESPUÉS de los endpoints API/WS porque mount("/") es greedy.
+WEB_DIR = Path(__file__).parent / "web"
+WEB_DIR.mkdir(exist_ok=True)
+app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")

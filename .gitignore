@@ -1,0 +1,60 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Estado local del runtime ---
+# La base de datos SQLite contiene actividad histórica del lab y no es
+# parte del código. Se crea automáticamente al primer arranque.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# --- Variables de entorno (credenciales reales) ---
+.env
+.env.local
+.env.*.local
+
+# --- IDE / Editores ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+
+# --- Estado interno de herramientas ---
+.claude/
+
+# --- Sistema operativo ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Logs ---
+*.log
+logs/
+
+# --- Distribución / packaging ---
+build/
+dist/
+*.egg-info/
+
+# --- Cobertura y testing ---
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+
+# --- Jupyter ---
+.ipynb_checkpoints/

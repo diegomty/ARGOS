@@ -1,0 +1,159 @@
+"""Respuesta autónoma: aplica ACLs en el Cisco vía SSH (Paramiko)."""
+
+import time
+from typing import List, Optional
+
+import paramiko
+
+from . import config
+
+
+def bloquear_ip_en_router(ip_objetivo: str, on_log=None) -> bool:
+    """Aplica `deny ip host <ip>` en la BLACKLIST de la interfaz de bloqueo.
+
+    Devuelve True si la sesión SSH terminó sin excepciones. `on_log` es un
+    callback opcional para emitir cada línea de progreso (lo usa el dashboard
+    para mostrar el log de respuesta autónoma en tiempo real).
+    """
+    if not ip_objetivo:
+        return False
+
+    log = on_log or (lambda _: None)
+    log(f"[!] INICIANDO CONTRAMEDIDA: bloqueando {ip_objetivo}")
+
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    exito = False
+    try:
+        ssh.connect(
+            config.IP_ROUTER_ADMIN,
+            username=config.USER_ROUTER,
+            password=config.PASS_ROUTER,
+            look_for_keys=False,
+            allow_agent=False,
+        )
+
+        # Cisco IOS exige una sesión interactiva: cada exec_command()
+        # abre un canal nuevo y se pierde el modo `conf t`.
+        shell = ssh.invoke_shell()
+        time.sleep(0.5)
+        shell.recv(65535)  # descarta banner
+
+        comandos: List[str] = [
+            "terminal length 0",
+            "conf t",
+            "ip access-list extended BLACKLIST",
+            f"deny ip host {ip_objetivo} any",
+            "permit ip any any",
+            f"interface {config.INTERFAZ_BLOQUEO}",
+            "ip access-group BLACKLIST in",
+            "end",
+            "write memory",
+        ]
+        for cmd in comandos:
+            shell.send(cmd + "\n")
+            log(f"  router# {cmd}")
+            time.sleep(0.4)
+
+        # Drenamos el buffer de salida (útil para auditoría y para
+        # confirmar visualmente que IOS aceptó cada comando).
+        salida = ""
+        while shell.recv_ready():
+            salida += shell.recv(65535).decode("utf-8", errors="ignore")
+
+        log(f"[✓] ÉXITO: IP {ip_objetivo} neutralizada")
+        exito = True
+    except Exception as e:
+        log(f"[X] ERROR EN RESPUESTA: {e}")
+    finally:
+        ssh.close()
+
+    return exito
+
+
+def _ejecutar_comandos_router(comandos: List[str], on_log) -> bool:
+    """Ejecuta una lista de comandos contra IOS vía invoke_shell.
+
+    Compartido entre `bloquear_ip_en_router`, `aislar_segmento` y
+    `reactivar_segmento` para no duplicar la lógica de SSH/shell.
+    Devuelve True si la sesión SSH terminó sin excepciones.
+    """
+    log = on_log or (lambda _: None)
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ok = False
+    try:
+        ssh.connect(
+            config.IP_ROUTER_ADMIN,
+            username=config.USER_ROUTER,
+            password=config.PASS_ROUTER,
+            look_for_keys=False,
+            allow_agent=False,
+        )
+        shell = ssh.invoke_shell()
+        time.sleep(0.5)
+        shell.recv(65535)
+
+        for cmd in comandos:
+            shell.send(cmd + "\n")
+            log(f"  router# {cmd}")
+            time.sleep(0.4)
+
+        salida = ""
+        while shell.recv_ready():
+            salida += shell.recv(65535).decode("utf-8", errors="ignore")
+
+        ok = True
+    except Exception as e:
+        log(f"[X] ERROR: {e}")
+    finally:
+        ssh.close()
+    return ok
+
+
+def aislar_segmento(label: str, interface: str, on_log=None) -> bool:
+    """Apaga la subinterfaz Cisco que sirve a un segmento → aislamiento total.
+
+    `label` es solo cosmético (para los logs). `interface` es el nombre
+    del subif p.ej. "f1/0.20". Devuelve True si los comandos se enviaron.
+    """
+    log = on_log or (lambda _: None)
+    if not interface:
+        log("[X] segmento sin interfaz asociada")
+        return False
+    log(f"[!] AISLAMIENTO: cerrando segmento {label} ({interface})")
+
+    comandos = [
+        "terminal length 0",
+        "conf t",
+        f"interface {interface}",
+        "shutdown",
+        "end",
+        "write memory",
+    ]
+    ok = _ejecutar_comandos_router(comandos, log)
+    if ok:
+        log(f"[OK] {label} aislado")
+    return ok
+
+
+def reactivar_segmento(label: str, interface: str, on_log=None) -> bool:
+    """Vuelve a levantar la subinterfaz — reverso de `aislar_segmento`."""
+    log = on_log or (lambda _: None)
+    if not interface:
+        log("[X] segmento sin interfaz asociada")
+        return False
+    log(f"[!] REACTIVACION: levantando segmento {label} ({interface})")
+
+    comandos = [
+        "terminal length 0",
+        "conf t",
+        f"interface {interface}",
+        "no shutdown",
+        "end",
+        "write memory",
+    ]
+    ok = _ejecutar_comandos_router(comandos, log)
+    if ok:
+        log(f"[OK] {label} reactivado")
+    return ok

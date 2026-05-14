@@ -1,0 +1,166 @@
+# Q-Sentinel — modelo lógico del lab EVE-NG.
+#
+# Cada `node` representa un elemento de red o un agregado lógico (departamento).
+# El campo `interface` indica el subif del router donde aplicaríamos una ACL si
+# tocamos "aislar" ese segmento desde la UI 3D.
+#
+# `position` es opcional: si se omite, el renderer 3D la calcula con un layout
+# de fibonacci sobre la malla. Útil para nodos donde sí queremos posición fija.
+
+name: Q-Sentinel Lab
+version: "1.0"
+
+nodes:
+  # --- Núcleo de gestión ---
+  - id: sentinel
+    label: Q-Sentinel
+    type: sentinel
+    ip: 192.168.128.1
+    subnet: 192.168.128.0/24
+    position: [0, 0, 0]   # centro del icosaedro
+
+  - id: r1
+    label: R1 · Cisco 7200
+    type: router
+    ip: 192.168.128.100
+    subnet: 192.168.128.0/24
+    metadata:
+      vendor: cisco
+      model: 7200
+      mgmt_interface: f0/0
+      external_interface: f2/0
+
+  - id: sw1
+    label: SW1 · IOSvL2
+    type: switch
+    metadata:
+      vendor: cisco
+      vlans: [10, 20, 30, 40, 50, 60]
+
+  # --- Departamentos (cada uno es un agregado de su VLAN/subred) ---
+  - id: dept-finanzas
+    label: Finanzas
+    type: department
+    subnet: 10.10.10.0/24
+    vlan: 10
+    interface: f1/0.10
+    metadata: {color_hint: "#5ee0d6", criticality: high}
+
+  - id: dept-rrhh
+    label: RR.HH.
+    type: department
+    subnet: 10.10.20.0/24
+    vlan: 20
+    interface: f1/0.20
+    metadata: {color_hint: "#a78bfa", criticality: high}
+
+  - id: dept-ti
+    label: TI
+    type: department
+    subnet: 10.10.30.0/24
+    vlan: 30
+    interface: f1/0.30
+    metadata: {color_hint: "#7cf09a", criticality: critical}
+
+  - id: dept-iplusd
+    label: I+D
+    type: department
+    subnet: 10.10.40.0/24
+    vlan: 40
+    interface: f1/0.40
+    metadata: {color_hint: "#f5c14b", criticality: critical}
+
+  - id: dept-produccion
+    label: Producción
+    type: department
+    subnet: 10.10.50.0/24
+    vlan: 50
+    interface: f1/0.50
+    metadata: {color_hint: "#fb923c", criticality: medium}
+
+  - id: dept-ventas
+    label: Ventas
+    type: department
+    subnet: 10.10.60.0/24
+    vlan: 60
+    interface: f1/0.60
+    metadata: {color_hint: "#60a5fa", criticality: medium}
+
+  # --- Hosts representativos (uno por departamento) ---
+  - id: host-finanzas
+    label: PC-FIN-01
+    type: host
+    ip: 10.10.10.10
+    parent: dept-finanzas
+
+  - id: host-rrhh
+    label: PC-RH-01
+    type: host
+    ip: 10.10.20.10
+    parent: dept-rrhh
+
+  - id: host-ti
+    label: PC-TI-01
+    type: host
+    ip: 10.10.30.10
+    parent: dept-ti
+
+  - id: host-iplusd
+    label: PC-ID-01
+    type: host
+    ip: 10.10.40.10
+    parent: dept-iplusd
+
+  - id: host-produccion
+    label: PC-PR-01
+    type: host
+    ip: 10.10.50.10
+    parent: dept-produccion
+
+  - id: host-ventas
+    label: PC-VE-01
+    type: host
+    ip: 10.10.60.10
+    parent: dept-ventas
+
+  # --- Zona externa (perímetro / atacante) ---
+  - id: external
+    label: Zona Externa
+    type: external
+    subnet: 10.0.0.0/24
+    interface: f2/0
+    metadata: {color_hint: "#ff4d6d", trust: untrusted}
+
+  - id: attacker
+    label: ATACANTE
+    type: host
+    ip: 10.0.0.2
+    parent: external
+    metadata: {role: threat-actor}
+
+links:
+  # Mgmt
+  - {source: sentinel, target: r1, type: mgmt, bandwidth: 1000}
+
+  # Núcleo: router ↔ switch (trunk dot1q)
+  - {source: r1, target: sw1, type: trunk, bandwidth: 1000}
+
+  # Switch ↔ departamentos (cada VLAN access)
+  - {source: sw1, target: dept-finanzas,    type: access, bandwidth: 1000}
+  - {source: sw1, target: dept-rrhh,        type: access, bandwidth: 1000}
+  - {source: sw1, target: dept-ti,          type: access, bandwidth: 1000}
+  - {source: sw1, target: dept-iplusd,      type: access, bandwidth: 1000}
+  - {source: sw1, target: dept-produccion,  type: access, bandwidth: 1000}
+  - {source: sw1, target: dept-ventas,      type: access, bandwidth: 1000}
+
+  # Departamento ↔ host representativo (capilaridad interna)
+  - {source: dept-finanzas,   target: host-finanzas,   type: access, bandwidth: 100}
+  - {source: dept-rrhh,       target: host-rrhh,       type: access, bandwidth: 100}
+  - {source: dept-ti,         target: host-ti,         type: access, bandwidth: 100}
+  - {source: dept-iplusd,     target: host-iplusd,     type: access, bandwidth: 100}
+  - {source: dept-produccion, target: host-produccion, type: access, bandwidth: 100}
+  - {source: dept-ventas,     target: host-ventas,     type: access, bandwidth: 100}
+
+  # Perímetro
+  - {source: r1,       target: external, type: external, bandwidth: 100}
+  - {source: external, target: attacker, type: access,   bandwidth: 100}

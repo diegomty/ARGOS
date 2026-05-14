@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Q-Sentinel · Inmunidad Digital Adaptativa</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.min.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <header>
+      <h1>Q-SENTINEL</h1>
+      <span class="sub">INMUNIDAD DIGITAL ADAPTATIVA · v1.4</span>
+      <span class="spacer"></span>
+      <span id="status" class="badge warn">conectando…</span>
+      <button id="btn-test" title="Inyectar evento sintético (debug)">⚡ test</button>
+    </header>
+
+    <section class="stats">
+      <div class="stat">
+        <div class="label">Eventos totales</div>
+        <div class="value" id="s-total">0</div>
+      </div>
+      <div class="stat">
+        <div class="label">Anomalías</div>
+        <div class="value" id="s-anom">0</div>
+      </div>
+      <div class="stat">
+        <div class="label">IPs bloqueadas</div>
+        <div class="value" id="s-blocked">0</div>
+      </div>
+      <div class="stat" id="stat-h">
+        <div class="label">Última H (bits)</div>
+        <div class="value" id="s-h">—</div>
+      </div>
+    </section>
+
+    <main class="hero">
+      <div class="view">
+        <div class="label"><span class="key">▶</span>DIGITAL TWIN · TOPOLOGÍA EN VIVO</div>
+        <canvas id="canvas-mesh"></canvas>
+      </div>
+
+      <aside class="sidebar">
+        <div class="panel">
+          <div class="panel-header">
+            <span class="title">Cadena post-cuántica · SHA-3-256</span>
+            <span class="spacer"></span>
+            <span class="count" id="hash-counter">0</span>
+          </div>
+          <div class="panel-body" id="hash-stream"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <span class="title">Amenazas neutralizadas</span>
+            <span class="spacer"></span>
+            <span class="count" id="blocked-counter">0</span>
+          </div>
+          <div class="panel-body" id="blocked-list">
+            <div class="blocked-empty">— sin amenazas detectadas —</div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <span class="title">Consola SSH · respuesta autónoma</span>
+            <span class="spacer"></span>
+            <span class="count" id="ssh-counter">0</span>
+          </div>
+          <div class="panel-body" id="ssh-console">
+            <div class="ssh-empty">— router en espera —</div>
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <section class="chart-strip">
+      <div class="chart-header">
+        <span class="chart-title">ENTROPÍA · ÚLTIMOS 30 MIN</span>
+        <span class="chart-legend">
+          <span class="legend-item"><span class="dot dot-cyan"></span>avg H</span>
+          <span class="legend-item"><span class="line line-amber"></span>umbral 5.0</span>
+          <span class="legend-item"><span class="dot dot-red"></span>anomalía</span>
+        </span>
+      </div>
+      <div id="chart-container" class="chart-container"></div>
+    </section>
+
+    <section class="ticker" id="ticker"></section>
+
+    <!-- Modal de aislamiento de segmento (touch-to-isolate) -->
+    <div id="node-modal" class="modal hidden">
+      <div id="modal-backdrop" class="modal-backdrop"></div>
+      <div class="modal-card">
+        <div class="modal-header">
+          <span class="modal-title">▶ AISLAMIENTO DE SEGMENTO</span>
+          <button id="modal-close" class="modal-close" aria-label="cerrar">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="modal-row">
+            <span class="modal-key">Segmento</span>
+            <span id="modal-node-label" class="modal-val">—</span>
+          </div>
+          <div class="modal-row">
+            <span class="modal-key">Subred</span>
+            <span id="modal-node-subnet" class="modal-val">—</span>
+          </div>
+          <div class="modal-row">
+            <span class="modal-key">Interfaz Cisco</span>
+            <span id="modal-node-iface" class="modal-val mono">—</span>
+          </div>
+          <div class="modal-row">
+            <span class="modal-key">Estado actual</span>
+            <span id="modal-node-state" class="modal-val">—</span>
+          </div>
+          <div id="modal-error" class="modal-error" style="display:none;"></div>
+          <p class="modal-hint">
+            La acción ejecuta <code>shutdown</code> / <code>no shutdown</code> en la
+            subinterfaz vía SSH. El cambio se persiste con <code>write memory</code>.
+          </p>
+        </div>
+        <div class="modal-footer">
+          <button id="modal-cancel" class="btn-cancel">CANCELAR</button>
+          <button id="modal-action" class="btn-action btn-isolate">▶ AISLAR SEGMENTO</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/js/main.js"></script>
+  </body>
+</html>
