@@ -10,6 +10,21 @@ import { TimeseriesChart } from './chart.js';
 // abrir el modal en nodos que no van a poder ejecutar la acción.)
 const ISOLATABLE_TYPES = new Set(['department', 'external']);
 
+// --- Toggle maximizar/restaurar paneles del sidebar ---
+const sidebar = document.querySelector('.sidebar');
+if (sidebar) {
+  sidebar.addEventListener('click', (e) => {
+    const btn = e.target.closest('.panel-toggle');
+    if (!btn) return;
+    const panel = btn.closest('.panel');
+    if (!panel) return;
+    const willMaximize = !panel.classList.contains('maximized');
+    sidebar.querySelectorAll('.panel.maximized').forEach(p => p.classList.remove('maximized'));
+    sidebar.classList.toggle('has-maximized', willMaximize);
+    if (willMaximize) panel.classList.add('maximized');
+  });
+}
+
 // --- Vista 3D ---
 const canvas = document.getElementById('canvas-mesh');
 const view = new MeshView(canvas);
@@ -63,6 +78,55 @@ function refreshStats() {
   $hStat.classList.toggle('warn',  state.rawH > 4.5 && state.rawH <= 5.0);
 }
 
+// --- Tarjeta "Detector ML" (Fase J) ---
+// El conteo de flujos marcados llega en vivo por WS (flow.ml); el estado
+// de los modelos (heredado cargado / línea base local) se refresca por
+// polling porque solo cambia al arrancar o en cada re-entrenamiento.
+const $ml = document.getElementById('s-ml');
+const $mlState = document.getElementById('s-ml-state');
+const $mlStat = document.getElementById('stat-ml');
+let mlFlagged = 0;
+
+function noteFlowVerdict(flow) {
+  if (!flow.ml?.is_anomaly) return;
+  mlFlagged++;
+  $ml.textContent = mlFlagged;
+  $mlStat.classList.add('alert');
+}
+
+async function refreshMlStatus() {
+  try {
+    const st = await fetch('/api/ml').then(r => r.json());
+    // El conteo del servidor incluye flujos previos a esta pestaña.
+    mlFlagged = st.flagged;
+    $ml.textContent = mlFlagged;
+    $mlStat.classList.toggle('alert', mlFlagged > 0);
+
+    const inherited = st.inherited_loaded;
+    const local = st.local?.ready;
+    if (inherited && local) {
+      $mlState.textContent = 'heredado + local activos';
+      $mlStat.classList.add('ok');
+      $mlStat.classList.remove('warn');
+    } else if (inherited) {
+      const n = st.local?.train_size ?? 0;
+      const min = st.local?.min_flows ?? 200;
+      $mlState.textContent = `heredado activo · base local ${n}/${min}`;
+      $mlStat.classList.add('warn');
+    } else if (local) {
+      $mlState.textContent = 'solo línea base local';
+      $mlStat.classList.add('warn');
+    } else {
+      $mlState.textContent = 'sin modelos — corre ml.train';
+      $mlStat.classList.add('alert');
+    }
+  } catch {
+    $mlState.textContent = 'estado no disponible';
+  }
+}
+refreshMlStatus();
+setInterval(refreshMlStatus, 10_000);
+
 // --- Estado local de nodos aislados (sincronizado por WS) ---
 const isolatedSet = new Set();
 
@@ -103,6 +167,7 @@ function connect() {
     } else if (msg.kind === 'topology_state') {
       applyTopologyState(msg.payload);
     } else if (msg.kind === 'flow') {
+      noteFlowVerdict(msg.payload);
       view.spawnFlow(msg.payload);
     }
   };

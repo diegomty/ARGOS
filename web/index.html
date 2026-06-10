@@ -40,6 +40,11 @@
         <div class="label">Última H (bits)</div>
         <div class="value" id="s-h">—</div>
       </div>
+      <div class="stat" id="stat-ml">
+        <div class="label">Detector ML · flujos marcados</div>
+        <div class="value" id="s-ml">—</div>
+        <div class="sub" id="s-ml-state">cargando…</div>
+      </div>
     </section>
 
     <main class="hero">
@@ -54,6 +59,7 @@
             <span class="title">Cadena post-cuántica · SHA-3-256</span>
             <span class="spacer"></span>
             <span class="count" id="hash-counter">0</span>
+            <button class="panel-toggle" title="Maximizar / restaurar">⛶</button>
           </div>
           <div class="panel-body" id="hash-stream"></div>
         </div>
@@ -63,6 +69,7 @@
             <span class="title">Amenazas neutralizadas</span>
             <span class="spacer"></span>
             <span class="count" id="blocked-counter">0</span>
+            <button class="panel-toggle" title="Maximizar / restaurar">⛶</button>
           </div>
           <div class="panel-body" id="blocked-list">
             <div class="blocked-empty">— sin amenazas detectadas —</div>
@@ -74,6 +81,7 @@
             <span class="title">Consola SSH · respuesta autónoma</span>
             <span class="spacer"></span>
             <span class="count" id="ssh-counter">0</span>
+            <button class="panel-toggle" title="Maximizar / restaurar">⛶</button>
           </div>
           <div class="panel-body" id="ssh-console">
             <div class="ssh-empty">— router en espera —</div>

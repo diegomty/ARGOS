@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS flows (
     protocol      TEXT    NOT NULL,
     packets       INTEGER NOT NULL,
     bytes         INTEGER NOT NULL,
+    duration_ms   INTEGER NOT NULL DEFAULT 0,  -- LAST_SWITCHED - FIRST_SWITCHED
     src_node      TEXT,                 -- node_id de la topología (NULL si IP no mapeada)
     dst_node      TEXT
 );
@@ -104,6 +105,18 @@ class Storage:
     def _init_schema(self) -> None:
         with self._lock, self._connect() as c:
             c.executescript(_SCHEMA)
+            self._migrate(c)
+
+    @staticmethod
+    def _migrate(c: sqlite3.Connection) -> None:
+        """Migraciones aditivas para DBs creadas con schemas anteriores.
+
+        `CREATE TABLE IF NOT EXISTS` no altera tablas existentes, así que
+        las columnas nuevas se agregan acá con ALTER TABLE idempotente.
+        """
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(flows)")}
+        if "duration_ms" not in cols:
+            c.execute("ALTER TABLE flows ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0")
 
     # ---- Writes ----
 
@@ -240,8 +253,8 @@ class Storage:
                 """
                 INSERT INTO flows (
                   received_at, exporter, src_ip, dst_ip, src_port, dst_port,
-                  protocol_num, protocol, packets, bytes, src_node, dst_node
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  protocol_num, protocol, packets, bytes, duration_ms, src_node, dst_node
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     time.time(),
@@ -254,6 +267,7 @@ class Storage:
                     flow.get("protocol", "unknown"),
                     int(flow.get("packets", 0) or 0),
                     int(flow.get("bytes", 0) or 0),
+                    int(flow.get("duration_ms", 0) or 0),
                     flow.get("src_node"),
                     flow.get("dst_node"),
                 ),
@@ -277,7 +291,7 @@ class Storage:
         params.append(int(limit))
         sql = f"""
             SELECT id, received_at, exporter, src_ip, dst_ip, src_port, dst_port,
-                   protocol_num, protocol, packets, bytes, src_node, dst_node
+                   protocol_num, protocol, packets, bytes, duration_ms, src_node, dst_node
               FROM flows
               {where}
              ORDER BY received_at DESC

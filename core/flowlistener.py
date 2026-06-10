@@ -265,6 +265,14 @@ class FlowListener:
         if not src_ip or not dst_ip:
             return None
         proto_num = int(d.get("PROTOCOL", 0) or 0)
+        # FIRST/LAST_SWITCHED vienen en ms de sysUptime del router. La resta da
+        # la duración del flujo; el contador de 32 bits envuelve cada ~49.7 días,
+        # así que corregimos el wrap sumando 2^32 cuando last < first.
+        first = int(d.get("FIRST_SWITCHED", 0) or 0)
+        last = int(d.get("LAST_SWITCHED", 0) or 0)
+        duration_ms = last - first
+        if duration_ms < 0:
+            duration_ms += 2 ** 32
         return {
             "src_ip": src_ip,
             "dst_ip": dst_ip,
@@ -274,5 +282,6 @@ class FlowListener:
             "protocol": PROTOCOL_NAMES.get(proto_num, f"proto-{proto_num}"),
             "packets": int(d.get("IN_PKTS", 0) or 0),
             "bytes": int(d.get("IN_BYTES", 0) or 0),
+            "duration_ms": duration_ms,
             "exporter": exporter,
         }

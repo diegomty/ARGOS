@@ -58,3 +58,11 @@ htmlcov/
 
 # --- Jupyter ---
 .ipynb_checkpoints/
+
+# --- Datasets externos (CICIDS2017, ~880 MB de CSVs) ---
+datasets/MachineLearningCVE/
+datasets/*.zip
+datasets/*.npz
+
+# --- Modelos ML entrenados (reproducibles con python -m ml.train) ---
+ml/models/

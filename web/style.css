@@ -56,7 +56,7 @@ button:hover { background: var(--cyan); color: var(--bg); }
 .spacer { flex: 1; }
 
 .stats {
-  display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px;
+  display: grid; grid-template-columns: repeat(5, 1fr); gap: 1px;
   background: var(--border);
   border-bottom: 1px solid var(--border);
 }
@@ -70,8 +70,16 @@ button:hover { background: var(--cyan); color: var(--bg); }
   font-variant-numeric: tabular-nums;
   transition: color 0.3s;
 }
+.stat .sub {
+  font-size: 10px; color: var(--muted); margin-top: 2px;
+  letter-spacing: 1px;
+}
 .stat.alert .value { color: var(--red); }
 .stat.warn  .value { color: var(--amber); }
+/* Estados del detector híbrido (tarjeta Detector ML) */
+#stat-ml.ok    .sub { color: var(--cyan); }
+#stat-ml.warn  .sub { color: var(--amber); }
+#stat-ml.alert .value, #stat-ml.alert .sub { color: var(--red); }
 
 /* --- Hero: malla + sidebar --- */
 .hero {
@@ -212,8 +220,8 @@ button:hover { background: var(--cyan); color: var(--bg); }
 
 /* --- Sidebar de paneles --- */
 .sidebar {
-  display: grid;
-  grid-template-rows: 1fr 1fr 1fr;
+  display: flex;
+  flex-direction: column;
   gap: 1px;
   background: var(--border);
   min-height: 0;
@@ -221,7 +229,8 @@ button:hover { background: var(--cyan); color: var(--bg); }
 .panel {
   background: var(--bg);
   display: flex; flex-direction: column;
-  min-height: 0;
+  flex: 1 1 0;
+  min-height: 80px;
 }
 .panel-header {
   padding: 10px 14px;
@@ -238,9 +247,28 @@ button:hover { background: var(--cyan); color: var(--bg); }
   padding: 2px 7px; border-radius: 2px;
   font-variant-numeric: tabular-nums;
 }
+.panel-toggle {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 6px;
+  cursor: pointer;
+  border-radius: 2px;
+  transition: color 0.15s, border-color 0.15s;
+}
+.panel-toggle:hover { color: var(--cyan); border-color: var(--cyan); }
+.sidebar.has-maximized .panel:not(.maximized) { flex: 0 0 auto; }
+.sidebar.has-maximized .panel:not(.maximized) .panel-body { display: none; }
+.sidebar.has-maximized .panel.maximized { flex: 1 1 auto; }
+.panel.maximized .panel-toggle { color: var(--cyan); border-color: var(--cyan); }
 .panel-body {
   flex: 1; overflow: auto;
   padding: 6px 0;
+  resize: vertical;
+  min-height: 60px;
+  max-height: 80vh;
 }
 .panel-body::-webkit-scrollbar { width: 4px; }
 .panel-body::-webkit-scrollbar-thumb { background: var(--border); }
@@ -248,16 +276,27 @@ button:hover { background: var(--cyan); color: var(--bg); }
 /* --- Panel 1: cadena SHA-3 --- */
 .hash-row {
   padding: 3px 14px;
-  display: flex; gap: 10px; align-items: center;
   font-size: 11px;
   border-left: 2px solid var(--border);
   margin: 1px 0;
+  cursor: pointer;
 }
+.hash-row-head { display: flex; gap: 10px; align-items: center; }
 .hash-row .ts { color: var(--muted); font-size: 10px; }
 .hash-row .hash {
   letter-spacing: 0.5px;
   word-break: break-all;
 }
+.hash-row-detail {
+  display: none;
+  padding-top: 4px;
+  font-size: 10px;
+  word-break: break-all;
+  line-height: 1.5;
+}
+.hash-row.expanded .hash-row-detail { display: block; }
+.hash-row-detail .lbl { color: var(--muted); opacity: 0.7; margin-right: 4px; }
+.hash-row-detail .raw-msg { margin-top: 3px; opacity: 0.9; }
 .hash-row.trust { border-left-color: var(--cyan); }
 .hash-row.trust .hash { color: var(--cyan); opacity: 0.85; }
 .hash-row.norm  { border-left-color: var(--amber); }

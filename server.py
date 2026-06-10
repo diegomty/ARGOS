@@ -27,10 +27,19 @@ from core.events import SentinelEvent
 from core.flowlistener import FlowListener
 from core.storage import Storage
 from core.topology import Topology
+from ml.detector import HybridDetector
 
 # Persistencia: SQLite WAL en `qsentinel.db`. Se inicializa al import,
 # antes de que arranque el listener, para que los esquemas existan.
 storage = Storage()
+
+# Detector ML híbrido (Fase J): modelo heredado CICIDS + línea base local.
+# Si el .joblib no existe o la línea base es chica, degrada con gracia
+# (ver ml/detector.py) — el servidor arranca igual.
+detector = HybridDetector()
+
+# Cada cuánto se re-entrena la línea base local con la ventana móvil.
+ML_RETRAIN_INTERVAL_S = 6 * 3600
 
 
 # Topología cargada una sola vez al startup. Si falla la carga, el
@@ -169,6 +178,15 @@ def _arrancar_flow_listener(loop: asyncio.AbstractEventLoop) -> Optional[FlowLis
         except Exception as e:
             print(f"[storage] save_flow ERROR: {e}", flush=True)
 
+        # Veredicto ML híbrido. Corre en este thread (sklearn por fila es
+        # ~1 ms, despreciable al rate del lab) y viaja con el flujo al WS
+        # para que el frontend pueda explicar quién marcó qué.
+        try:
+            flow["ml"] = detector.evaluate(flow)
+        except Exception as e:
+            print(f"[ml] evaluate ERROR: {e}", flush=True)
+            flow["ml"] = None
+
         # Solo difundimos flujos cuyos endpoints mapean a la topología —
         # los del propio R1 hacia sí mismo no aportan a la viz.
         if flow["src_node"] and flow["dst_node"] and flow["src_node"] != flow["dst_node"]:
@@ -216,13 +234,30 @@ def _arrancar_listener(loop: asyncio.AbstractEventLoop) -> threading.Thread:
     return thread
 
 
+async def _ml_retrain_loop() -> None:
+    """Re-entrena la línea base local cada ML_RETRAIN_INTERVAL_S.
+
+    El primer entrenamiento corre al arranque (con lo que haya en la DB);
+    los siguientes mantienen la ventana móvil fresca. `to_thread` evita
+    bloquear el event loop durante el fit (segundos con 50k flujos).
+    """
+    while True:
+        try:
+            await asyncio.to_thread(detector.retrain_local, storage)
+        except Exception as e:
+            print(f"[ml] retrain ERROR: {e}", flush=True)
+        await asyncio.sleep(ML_RETRAIN_INTERVAL_S)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _flow_listener
     loop = asyncio.get_running_loop()
     _arrancar_listener(loop)
     _flow_listener = _arrancar_flow_listener(loop)
+    retrain_task = asyncio.create_task(_ml_retrain_loop())
     yield
+    retrain_task.cancel()
     if _flow_listener is not None:
         _flow_listener.stop()
 
@@ -321,6 +356,24 @@ async def get_topology() -> JSONResponse:
     return JSONResponse(_topology.to_dict())
 
 
+@app.get("/api/ml")
+async def ml_status() -> dict:
+    """Estado de la capa ML: modelos cargados, línea base local, contadores."""
+    return detector.stats()
+
+
+@app.post("/api/ml/retrain")
+async def ml_retrain() -> JSONResponse:
+    """Fuerza el re-entrenamiento de la línea base local desde SQLite.
+
+    Pensado para validación/demos: evita reiniciar el servidor cada vez que
+    se acumula tráfico nuevo. En producción el re-entrenamiento periódico
+    (cada ML_RETRAIN_INTERVAL_S) basta.
+    """
+    ready = await asyncio.to_thread(detector.retrain_local, storage)
+    return JSONResponse({"ready": ready, "local": detector.local.stats()})
+
+
 @app.get("/api/stats")
 async def stats() -> dict:
     return {
@@ -351,6 +404,34 @@ async def test_event() -> JSONResponse:
     )
     await _persist_record_and_broadcast(fake.to_dict())
     return JSONResponse({"injected": True})
+
+
+@app.post("/api/test-flow")
+async def test_flow(req: dict | None = None) -> JSONResponse:
+    """Inyecta un flujo sintético — verifica partículas y veredicto ML sin lab.
+
+    Body opcional: {"anomalous": true} fabrica un flujo tipo exfiltración y
+    además fuerza `ml.is_anomaly` (es debug visual, no validación del
+    detector: para eso está el lab). Sin body, fabrica tráfico web normal.
+    """
+    anomalous = bool((req or {}).get("anomalous"))
+    flow = {
+        "src_ip": "10.10.1.10", "dst_ip": "10.0.0.99",
+        "src_port": 51234, "dst_port": 4444 if anomalous else 443,
+        "protocol_num": 6, "protocol": "tcp",
+        "packets": 40000 if anomalous else 38,
+        "bytes": 50_000_000 if anomalous else 24_000,
+        "duration_ms": 60_000 if anomalous else 1_800,
+        "exporter": "127.0.0.1",
+        "src_node": "dept-ti", "dst_node": "external",
+    }
+    flow["ml"] = detector.evaluate(flow)
+    if anomalous:
+        flow["ml"]["is_anomaly"] = True
+        if "debug" not in flow["ml"]["detectors"]:
+            flow["ml"]["detectors"].append("debug")
+    await manager.broadcast({"kind": "flow", "payload": flow})
+    return JSONResponse({"injected": True, "ml": flow["ml"]})
 
 
 async def _persist_record_and_broadcast(payload: dict) -> None:

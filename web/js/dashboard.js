@@ -30,15 +30,30 @@ function renderHash(ev) {
   const row = document.createElement('div');
   const cls = ev.is_anomaly ? 'anom' : (ev.is_trusted ? 'trust' : 'norm');
   row.className = 'hash-row ' + cls;
+  const ts = ev.timestamp.split(' ')[1].slice(0, 12);
+  const hashShort = ev.sha3.slice(0, 24);
+  const raw = escapeHtml(ev.raw_message || '');
   row.innerHTML = `
-    <span class="ts">${ev.timestamp.split(' ')[1].slice(0, 12)}</span>
-    <span class="hash">${ev.sha3.slice(0, 24)}…</span>
+    <div class="hash-row-head">
+      <span class="ts">${ts}</span>
+      <span class="hash">${hashShort}…</span>
+    </div>
+    <div class="hash-row-detail">
+      <div class="hash-full"><span class="lbl">SHA-3</span>${ev.sha3}</div>
+      <div class="raw-msg"><span class="lbl">MSG</span>${raw}</div>
+    </div>
   `;
+  row.addEventListener('click', () => row.classList.toggle('expanded'));
   $hashStream.prepend(row);
   while ($hashStream.children.length > HASH_HISTORY) {
     $hashStream.removeChild($hashStream.lastChild);
   }
   $hashCounter.textContent = state.totalEvents.toString();
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // --- Panel 2: amenazas neutralizadas ---

@@ -128,7 +128,13 @@ export function buildTopology(topology) {
       console.warn('[flow] sin path para', key, '· paths conocidos:', flowPaths.size);
       return;
     }
-    const colorHex = FLOW_COLOR[flow.protocol] ?? FLOW_DEFAULT_COLOR;
+    // Veredicto del detector híbrido (flow.ml viene del servidor): los
+    // flujos marcados viajan en rojo, más grandes y más lentos para que
+    // el ojo del operador los capture entre el tráfico normal.
+    const flagged = !!flow.ml?.is_anomaly;
+    const colorHex = flagged
+      ? 0xff4d6d
+      : (FLOW_COLOR[flow.protocol] ?? FLOW_DEFAULT_COLOR);
     const mat = new THREE.MeshBasicMaterial({
       color: colorHex,
       transparent: true,
@@ -137,11 +143,15 @@ export function buildTopology(topology) {
       blending: THREE.AdditiveBlending,
     });
     const mesh = new THREE.Mesh(FLOW_PARTICLE_GEOM, mat);
+    if (flagged) mesh.scale.setScalar(1.7);
     // renderOrder alto: las partículas se dibujan DESPUÉS de la membrana,
     // así nunca quedan atenuadas por la transparencia del icosaedro.
     mesh.renderOrder = 20;
     group.add(mesh);
-    particles.push({ mesh, curve, progress: 0, duration: FLOW_DURATION_S });
+    particles.push({
+      mesh, curve, progress: 0,
+      duration: flagged ? FLOW_DURATION_S * 1.6 : FLOW_DURATION_S,
+    });
   }
 
   return {
