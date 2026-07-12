@@ -1,0 +1,28 @@
+# hora | usuario | evento | ip
+# --- bloque normal: jornada laboral ---
+08:55 | admin    | login                        | 192.168.1.10
+09:01 | admin    | consulta tabla clientes      | 192.168.1.10
+09:15 | analista | consulta reporte ventas      | 192.168.1.15
+09:42 | analista | consulta dashboard           | 192.168.1.15
+10:05 | rrhh     | login                        | 192.168.1.22
+10:18 | rrhh     | consulta nomina              | 192.168.1.22
+11:30 | admin    | actualizacion politica       | 192.168.1.10
+12:10 | analista | logout                       | 192.168.1.15
+13:45 | finanzas | login                        | 192.168.1.30
+14:00 | finanzas | consulta cuentas             | 192.168.1.30
+14:30 | admin    | descarga reporte             | 192.168.1.10
+15:20 | rrhh     | logout                       | 192.168.1.22
+16:50 | finanzas | logout                       | 192.168.1.30
+17:00 | admin    | logout                       | 192.168.1.10
+# --- bloque sospechoso: madrugada, IP externa ---
+02:55 | admin    | login                        | 185.32.44.10
+02:57 | admin    | descarga base completa       | 185.32.44.10
+03:01 | admin    | logout                       | 185.32.44.10
+03:10 | root     | intento fallido login        | 185.32.44.10
+03:12 | root     | intento fallido login        | 185.32.44.10
+03:15 | root     | intento fallido login        | 185.32.44.10
+03:17 | root     | intento fallido login        | 185.32.44.10
+03:20 | root     | login exitoso                | 185.32.44.10
+03:22 | root     | exfiltracion datos clientes  | 185.32.44.10
+03:30 | root     | modificacion logs sistema    | 185.32.44.10
+03:45 | root     | creacion usuario backdoor    | 185.32.44.10

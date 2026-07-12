@@ -374,6 +374,34 @@ async def ml_retrain() -> JSONResponse:
     return JSONResponse({"ready": ready, "local": detector.local.stats()})
 
 
+@app.get("/api/discovery")
+async def discovery(window: Optional[float] = None, min_flows: int = 2) -> JSONResponse:
+    """Topología DESCUBIERTA automáticamente a partir de los flujos observados.
+
+    A diferencia de `/api/topology` (modelo declarado a mano en topology.yaml),
+    este endpoint construye el grafo de red observando el tráfico: nodos, roles
+    inferidos, servicios expuestos y relaciones. Si existe topology.yaml, se usa
+    solo como capa de anotación (etiquetas, criticidad) sobre lo descubierto.
+
+    * `window`     — segundos hacia atrás a considerar (None = todo el histórico).
+    * `min_flows`  — descarta nodos con menos flujos (doma el ruido efímero).
+    """
+    from core.discovery import discover_from_storage, annotate, filter_graph
+
+    def _build() -> dict:
+        graph = discover_from_storage(storage, window_s=window)
+        graph = filter_graph(graph, max(1, int(min_flows)))
+        if _topology is not None:
+            annotate(graph, _topology)
+        return graph
+
+    try:
+        graph = await asyncio.to_thread(_build)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    return JSONResponse(graph)
+
+
 @app.get("/api/stats")
 async def stats() -> dict:
     return {

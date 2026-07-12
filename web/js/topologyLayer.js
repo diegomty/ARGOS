@@ -1,21 +1,33 @@
 // Capa de topología: convierte el JSON de /api/topology en geometría 3D
-// (nodos como mallas + etiquetas CSS2D) que vive dentro del icosaedro.
+// (nodos + etiquetas CSS2D) que vive dentro del icosaedro.
+//
+// Estética "red neuronal": los endpoints (departamentos, hosts, zona
+// externa) son orbes luminosos con halo — las "neuronas" —, y la
+// infraestructura (sentinel, router, switch) conserva formas cristalinas
+// para que el operador distinga el tipo de un vistazo. Los enlaces son
+// sinapsis delgadas y estáticas. El glow real lo aporta el bloom del
+// post-procesado (ver viewMesh.js).
+//
+// Nota: las únicas partículas en movimiento son los flujos NetFlow REALES
+// (spawnFlow). No hay animación ambiente decorativa — todo lo que se mueve
+// representa tráfico real, para no inducir a pensar que hay actividad
+// cuando la red está en silencio.
 //
 // El layout es radial determinista — los departamentos forman un anillo,
-// cada host orbita su departamento, y la zona externa queda al "norte"
-// fuera de la membrana.
+// cada host orbita su departamento, y la zona externa queda al "norte".
 
 import * as THREE from 'three';
 import { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 
-// --- Geometrías por tipo (creadas una sola vez y reutilizadas) ---
-const GEOMETRY = {
-  sentinel:   new THREE.IcosahedronGeometry(0.10, 1),
-  router:     new THREE.OctahedronGeometry(0.11, 0),
-  switch:     new THREE.BoxGeometry(0.16, 0.05, 0.16),
-  department: new THREE.BoxGeometry(0.18, 0.18, 0.18),
-  host:       new THREE.BoxGeometry(0.07, 0.07, 0.07),
-  external:   new THREE.IcosahedronGeometry(0.13, 0),
+// --- Especificación por tipo de nodo: geometría + tamaño de halo ---
+//   Orbes (esferas) para "neuronas"; poliedros para infraestructura.
+const NODE_SPEC = {
+  sentinel:   { geom: new THREE.IcosahedronGeometry(0.11, 1), halo: 0.30, emissive: 0.95 },
+  router:     { geom: new THREE.OctahedronGeometry(0.09, 0),  halo: 0.24, emissive: 0.80 },
+  switch:     { geom: new THREE.OctahedronGeometry(0.07, 0),  halo: 0.18, emissive: 0.75 },
+  department: { geom: new THREE.SphereGeometry(0.09, 28, 28), halo: 0.28, emissive: 0.85 },
+  host:       { geom: new THREE.SphereGeometry(0.04, 18, 18), halo: 0.14, emissive: 0.70 },
+  external:   { geom: new THREE.IcosahedronGeometry(0.10, 0), halo: 0.27, emissive: 0.90 },
 };
 
 // Color por defecto cuando el nodo no trae `metadata.color_hint`.
@@ -33,19 +45,16 @@ const FALLBACK_COLOR = {
 const LABELED_TYPES = new Set(['sentinel', 'router', 'department', 'external']);
 const LABELED_IDS   = new Set(['attacker']);
 
-// --- Estilos de los enlaces por tipo ---
-//   trunk:    R1 ↔ SW1, backbone que carga las 6 VLANs (dot1q)
-//   access:   capilar (SW1 → depto, depto → host)
-//   external: perímetro hacia la zona untrusted
-//   mgmt:     SSH/syslog del Sentinel al router
+// --- Estilos de los enlaces (sinapsis) por tipo ---
+//   Más delgados y brillantes que antes; el bloom hace el resto.
 const LINK_STYLE = {
-  trunk:    { color: 0x5ee0d6, radius: 0.012, opacity: 0.75 },
-  access:   { color: 0x6c7a99, radius: 0.005, opacity: 0.45 },
-  external: { color: 0xff4d6d, radius: 0.009, opacity: 0.65 },
-  mgmt:     { color: 0xa78bfa, radius: 0.006, opacity: 0.55 },
+  trunk:    { color: 0x5ee0d6, radius: 0.009, opacity: 0.55 },
+  access:   { color: 0x3a4a6b, radius: 0.004, opacity: 0.40 },
+  external: { color: 0xff4d6d, radius: 0.007, opacity: 0.55 },
+  mgmt:     { color: 0xa78bfa, radius: 0.005, opacity: 0.50 },
 };
 
-// --- Color de la partícula según protocolo IANA ---
+// --- Color de la partícula de flujo NetFlow según protocolo IANA ---
 const FLOW_COLOR = {
   icmp: 0xfb923c,   // naranja — recon / control
   tcp:  0x5ee0d6,   // cyan — datos confiables
@@ -54,6 +63,40 @@ const FLOW_COLOR = {
 const FLOW_DEFAULT_COLOR = 0x6c7a99;
 const FLOW_DURATION_S    = 1.6;
 const FLOW_PARTICLE_GEOM = new THREE.SphereGeometry(0.055, 12, 12);
+
+// --- Textura de halo (gradiente radial) generada una vez y reutilizada ---
+const GLOW_TEXTURE = makeGlowTexture();
+
+function makeGlowTexture() {
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  g.addColorStop(0.0, 'rgba(255,255,255,1.0)');
+  g.addColorStop(0.25, 'rgba(255,255,255,0.55)');
+  g.addColorStop(0.55, 'rgba(255,255,255,0.18)');
+  g.addColorStop(1.0, 'rgba(255,255,255,0.0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+function makeHalo(colorHex, size, opacity = 0.38) {
+  const mat = new THREE.SpriteMaterial({
+    map: GLOW_TEXTURE,
+    color: colorHex,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    opacity,
+  });
+  const sprite = new THREE.Sprite(mat);
+  sprite.scale.setScalar(size);
+  return sprite;
+}
 
 export function buildTopology(topology) {
   const group = new THREE.Group();
@@ -66,27 +109,35 @@ export function buildTopology(topology) {
     const pos = positions.get(node.id);
     if (!pos) continue;
 
+    const spec = NODE_SPEC[node.type] ?? NODE_SPEC.host;
     const colorHex = node.metadata?.color_hint
       ? new THREE.Color(node.metadata.color_hint).getHex()
       : FALLBACK_COLOR[node.type] ?? 0xffffff;
 
+    // Halo luminoso detrás del núcleo (sprite siempre de cara a cámara).
+    const halo = makeHalo(colorHex, spec.halo);
+    halo.position.copy(pos);
+    group.add(halo);
+
+    // Núcleo emisivo — su brillo alto hace que el bloom lo haga florecer.
     const mat = new THREE.MeshStandardMaterial({
       color: colorHex,
       emissive: colorHex,
-      emissiveIntensity: node.type === 'sentinel' ? 0.9 : 0.5,
-      metalness: 0.3,
-      roughness: 0.45,
+      emissiveIntensity: spec.emissive,
+      metalness: 0.25,
+      roughness: 0.4,
     });
-
-    const mesh = new THREE.Mesh(GEOMETRY[node.type] ?? GEOMETRY.host, mat);
+    const mesh = new THREE.Mesh(spec.geom, mat);
     mesh.position.copy(pos);
-    // Guardamos los originales del material para poder restaurarlos
-    // cuando un nodo deja de estar aislado (estado isolated → activo).
+    // Guardamos originales + refs para restaurar tras aislamiento.
     mesh.userData = {
       node,
+      halo,
+      haloBaseScale: spec.halo,
+      haloBaseColor: new THREE.Color(colorHex),
       originalColor: mat.color.clone(),
       originalEmissive: mat.emissive.clone(),
-      originalEmissiveIntensity: mat.emissiveIntensity,
+      originalEmissiveIntensity: spec.emissive,
     };
 
     if (LABELED_TYPES.has(node.type) || LABELED_IDS.has(node.id)) {
@@ -99,26 +150,22 @@ export function buildTopology(topology) {
     group.add(mesh);
   }
 
-  // --- Enlaces (tubos curvos entre nodos) ---
+  // --- Enlaces (sinapsis estáticas entre nodos) ---
   const linkMeshes = buildLinks(topology, positions, group);
 
-  // --- Paths para animación de flujos ---
-  // Pre-computamos la curva entre cada par (src_node, dst_node) que pueda
-  // generar tráfico, pasando por sw1 (dept↔dept) o r1 (dept↔external).
+  // --- Paths para animación de flujos NetFlow ---
   const flowPaths = computeFlowPaths(topology, positions);
 
-  // Pool de partículas activas — { mesh, progress, duration, curve }
+  // Pool de partículas activas — solo flujos NetFlow reales.
   const particles = [];
 
-  // Iluminación local — los MeshStandardMaterial necesitan luz para
-  // mostrar matices. Una key + ambient suaves bastan.
-  const ambient = new THREE.AmbientLight(0xffffff, 0.55);
-  const key = new THREE.DirectionalLight(0xffffff, 0.7);
+  // Iluminación local — los MeshStandardMaterial necesitan luz para los
+  // matices; el emissive aporta el brillo base.
+  const ambient = new THREE.AmbientLight(0xffffff, 0.5);
+  const key = new THREE.DirectionalLight(0xffffff, 0.6);
   key.position.set(2, 3, 2);
   group.add(ambient, key);
 
-  // Conjunto mutable de node_ids aislados — main.js lo actualiza con
-  // los mensajes `topology_state` que llegan por WebSocket.
   const isolatedSet = new Set();
 
   function spawnFlow(flow) {
@@ -128,9 +175,8 @@ export function buildTopology(topology) {
       console.warn('[flow] sin path para', key, '· paths conocidos:', flowPaths.size);
       return;
     }
-    // Veredicto del detector híbrido (flow.ml viene del servidor): los
-    // flujos marcados viajan en rojo, más grandes y más lentos para que
-    // el ojo del operador los capture entre el tráfico normal.
+    // Veredicto del detector híbrido (flow.ml): los flujos marcados viajan
+    // en rojo, más grandes y lentos para que el ojo del operador los capture.
     const flagged = !!flow.ml?.is_anomaly;
     const colorHex = flagged
       ? 0xff4d6d
@@ -138,14 +184,12 @@ export function buildTopology(topology) {
     const mat = new THREE.MeshBasicMaterial({
       color: colorHex,
       transparent: true,
-      opacity: 0.0,                 // sube en el fade-in
+      opacity: 0.0,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     });
     const mesh = new THREE.Mesh(FLOW_PARTICLE_GEOM, mat);
     if (flagged) mesh.scale.setScalar(1.7);
-    // renderOrder alto: las partículas se dibujan DESPUÉS de la membrana,
-    // así nunca quedan atenuadas por la transparencia del icosaedro.
     mesh.renderOrder = 20;
     group.add(mesh);
     particles.push({
@@ -166,24 +210,32 @@ export function buildTopology(topology) {
     spawnFlow,
     update(state, dt, t) {
       const breathe = 1 + state.pulse * 0.18;
-      const isolatedPulse = 0.55 + Math.sin(t * 4.0) * 0.35;  // halo rojo pulsante
+      const isolatedPulse = 0.55 + Math.sin(t * 4.0) * 0.35;   // halo rojo pulsante
+      const haloBreath = 1 + Math.sin(t * 1.6) * 0.06;         // respiración sutil del halo
 
       for (const [id, m] of nodeMeshes) {
         const node = m.userData.node;
         const isolated = isolatedSet.has(id);
+        const halo = m.userData.halo;
 
-        // --- Material: tinte gris + halo rojo cuando aislado, original cuando no ---
         if (isolated) {
+          // Aislado: núcleo gris apagado + halo rojo pulsante.
           m.material.color.setHex(0x303040);
           m.material.emissive.setHex(0xff4d6d);
           m.material.emissiveIntensity = isolatedPulse;
+          halo.material.color.setHex(0xff4d6d);
+          halo.material.opacity = 0.5 + isolatedPulse * 0.4;
+          halo.scale.setScalar(m.userData.haloBaseScale * (1.1 + isolatedPulse * 0.15));
         } else {
           m.material.color.copy(m.userData.originalColor);
           m.material.emissive.copy(m.userData.originalEmissive);
           m.material.emissiveIntensity = m.userData.originalEmissiveIntensity;
+          halo.material.color.copy(m.userData.haloBaseColor);
+          halo.material.opacity = 0.38;
+          halo.scale.setScalar(m.userData.haloBaseScale * haloBreath);
         }
 
-        // --- Escala: respiración por anomalía + encogimiento por aislamiento ---
+        // Escala: respiración por anomalía + encogimiento por aislamiento.
         let scale = 1;
         if (node.type === 'department') scale *= breathe;
         if (isolated) scale *= 0.8;
@@ -192,15 +244,14 @@ export function buildTopology(topology) {
         m.rotation.y += dt * 0.25;
       }
 
-      // --- Links: rojos pulsantes si tocan un nodo aislado, originales si no ---
+      // --- Links: rojos pulsantes si tocan un nodo aislado ---
       for (const lm of linkMeshes) {
         const link = lm.userData.link;
         const cut = isolatedSet.has(link.source) || isolatedSet.has(link.target);
         if (cut) {
           lm.material.color.setHex(0xff4d6d);
-          lm.material.opacity = 0.25 + Math.sin(t * 3.0) * 0.20;
+          lm.material.opacity = 0.3 + Math.sin(t * 3.0) * 0.22;
         } else if (link.type === 'external') {
-          // Pulso del enlace perimetral durante bloqueos automáticos.
           lm.material.color.copy(lm.userData.originalColor);
           lm.material.opacity = lm.userData.originalOpacity + state.blockPulse * 0.4;
         } else {
@@ -209,9 +260,7 @@ export function buildTopology(topology) {
         }
       }
 
-      // --- Partículas de flujos NetFlow ---
-      // Avanzan a velocidad constante a lo largo de su curva. Fade in
-      // al inicio, fade out al final, eliminamos al completar.
+      // --- Partículas de flujos NetFlow reales ---
       for (let i = particles.length - 1; i >= 0; i--) {
         const p = particles[i];
         p.progress += dt / p.duration;
@@ -221,18 +270,15 @@ export function buildTopology(topology) {
           particles.splice(i, 1);
           continue;
         }
-        const pos = p.curve.getPointAt(p.progress);
-        p.mesh.position.copy(pos);
-        // Bell-shaped opacity: 0 → 0.95 → 0 con pico al 50%
+        p.mesh.position.copy(p.curve.getPointAt(p.progress));
         p.mesh.material.opacity = Math.sin(p.progress * Math.PI) * 0.95;
       }
     },
   };
 }
 
-// Pre-computa una curva CatmullRom entre cada par (src, dst) de nodos
-// que pueden generar tráfico. dept↔dept pasa por sw1, dept↔external por r1.
-// Resultado: un Map<"src->dst", THREE.CatmullRomCurve3>.
+// Pre-computa una curva CatmullRom entre cada par (src, dst) de nodos que
+// pueden generar tráfico. dept↔dept pasa por sw1, dept↔external por r1.
 function computeFlowPaths(topology, positions) {
   const paths = new Map();
   const sw = topology.nodes.find(n => n.type === 'switch');
@@ -251,8 +297,6 @@ function computeFlowPaths(topology, positions) {
       const b = positions.get(dst.id);
       if (!a || !b) continue;
 
-      // Ruta lógica: traffic between two depts goes through SW1; traffic
-      // to/from external zone goes through R1.
       let waypoints;
       if (src.type === 'department' && dst.type === 'department' && swPos) {
         waypoints = [a, swPos.clone().lerp(a, 0.2), swPos, swPos.clone().lerp(b, 0.2), b];
@@ -275,9 +319,8 @@ function buildLinks(topology, positions, group) {
     const b = positions.get(link.target);
     if (!a || !b) continue;
 
-    // Punto de control del Bezier: punto medio empujado ligeramente
-    // hacia el origen → curvas que "abrazan" el núcleo, evitando que
-    // múltiples links solapen en línea recta.
+    // Punto de control del Bezier: punto medio empujado hacia el origen →
+    // curvas que "abrazan" el núcleo, evitando solapes en línea recta.
     const mid = a.clone().add(b).multiplyScalar(0.5);
     const towardCenter = mid.clone().multiplyScalar(-0.18);
     const control = mid.clone().add(towardCenter);
@@ -285,8 +328,6 @@ function buildLinks(topology, positions, group) {
     const curve = new THREE.QuadraticBezierCurve3(a, control, b);
     const style = LINK_STYLE[link.type] ?? LINK_STYLE.access;
 
-    // 32 segmentos longitudinales, 6 radiales — suave sin pasarse
-    // de polígonos (16 links * 32 * 6 ≈ 3k tris totales, irrelevante).
     const tubeGeo = new THREE.TubeGeometry(curve, 32, style.radius, 6, false);
     const mat = new THREE.MeshBasicMaterial({
       color: style.color,
@@ -311,7 +352,7 @@ function geometricRadius(type) {
   switch (type) {
     case 'department': return 0.10;
     case 'router':     return 0.08;
-    case 'sentinel':   return 0.08;
+    case 'sentinel':   return 0.10;
     case 'external':   return 0.10;
     default:           return 0.05;
   }
@@ -350,7 +391,7 @@ function computeLayout(topology) {
     const angle = (i / depts.length) * Math.PI * 2;
     positions.set(depts[i].id, new THREE.Vector3(
       Math.cos(angle) * DEPT_RADIUS,
-      Math.sin(i * 1.3) * 0.08,   // ondulación sutil para que no parezca un disco plano
+      Math.sin(i * 1.3) * 0.08,
       Math.sin(angle) * DEPT_RADIUS,
     ));
   }

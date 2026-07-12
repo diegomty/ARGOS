@@ -16,55 +16,66 @@
   </head>
   <body>
     <header>
-      <h1>Q-SENTINEL</h1>
-      <span class="sub">INMUNIDAD DIGITAL ADAPTATIVA · v1.4</span>
+      <div class="brand">
+        <h1>Q-SENTINEL</h1>
+        <span class="sub">Inmunidad Digital Adaptativa · v1.4</span>
+      </div>
       <span class="spacer"></span>
-      <span id="status" class="badge warn">conectando…</span>
-      <button id="btn-test" title="Inyectar evento sintético (debug)">⚡ test</button>
+      <div class="header-meta">
+        <span id="status" class="badge warn">conectando…</span>
+        <button id="btn-test" title="Inyectar evento sintético (debug)">⚡ test</button>
+      </div>
     </header>
 
-    <section class="stats">
-      <div class="stat">
-        <div class="label">Eventos totales</div>
-        <div class="value" id="s-total">0</div>
+    <section class="kpi-band">
+      <div class="kpi-group">
+        <div class="kpi-group-label">Detección</div>
+        <div class="kpi-cluster">
+          <div class="kpi">
+            <div class="kpi-label">Eventos totales</div>
+            <div class="kpi-value" id="s-total">0</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">Anomalías</div>
+            <div class="kpi-value" id="s-anom">0</div>
+          </div>
+        </div>
       </div>
-      <div class="stat">
-        <div class="label">Anomalías</div>
-        <div class="value" id="s-anom">0</div>
+
+      <div class="kpi-group">
+        <div class="kpi-group-label">Respuesta autónoma</div>
+        <div class="kpi-cluster">
+          <div class="kpi">
+            <div class="kpi-label">IPs bloqueadas</div>
+            <div class="kpi-value" id="s-blocked">0</div>
+          </div>
+        </div>
       </div>
-      <div class="stat">
-        <div class="label">IPs bloqueadas</div>
-        <div class="value" id="s-blocked">0</div>
-      </div>
-      <div class="stat" id="stat-h">
-        <div class="label">Última H (bits)</div>
-        <div class="value" id="s-h">—</div>
-      </div>
-      <div class="stat" id="stat-ml">
-        <div class="label">Detector ML · flujos marcados</div>
-        <div class="value" id="s-ml">—</div>
-        <div class="sub" id="s-ml-state">cargando…</div>
+
+      <div class="kpi-group">
+        <div class="kpi-group-label">Señal en vivo</div>
+        <div class="kpi-cluster">
+          <div class="kpi" id="stat-h">
+            <div class="kpi-label">Última H (bits)</div>
+            <div class="kpi-value" id="s-h">—</div>
+          </div>
+          <div class="kpi" id="stat-ml">
+            <div class="kpi-label">Detector ML · marcados</div>
+            <div class="kpi-value" id="s-ml">—</div>
+            <div class="kpi-sub" id="s-ml-state">cargando…</div>
+          </div>
+        </div>
       </div>
     </section>
 
     <main class="hero">
       <div class="view">
-        <div class="label"><span class="key">▶</span>DIGITAL TWIN · TOPOLOGÍA EN VIVO</div>
+        <div class="view-label"><span class="key">▶</span>Digital Twin · Topología en vivo</div>
         <canvas id="canvas-mesh"></canvas>
       </div>
 
       <aside class="sidebar">
-        <div class="panel">
-          <div class="panel-header">
-            <span class="title">Cadena post-cuántica · SHA-3-256</span>
-            <span class="spacer"></span>
-            <span class="count" id="hash-counter">0</span>
-            <button class="panel-toggle" title="Maximizar / restaurar">⛶</button>
-          </div>
-          <div class="panel-body" id="hash-stream"></div>
-        </div>
-
-        <div class="panel">
+        <div class="panel panel-priority">
           <div class="panel-header">
             <span class="title">Amenazas neutralizadas</span>
             <span class="spacer"></span>
@@ -87,22 +98,33 @@
             <div class="ssh-empty">— router en espera —</div>
           </div>
         </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <span class="title">Cadena forense · SHA-3-256</span>
+            <span class="spacer"></span>
+            <span class="count" id="hash-counter">0</span>
+            <button class="panel-toggle" title="Maximizar / restaurar">⛶</button>
+          </div>
+          <div class="panel-body" id="hash-stream"></div>
+        </div>
       </aside>
     </main>
 
-    <section class="chart-strip">
-      <div class="chart-header">
-        <span class="chart-title">ENTROPÍA · ÚLTIMOS 30 MIN</span>
-        <span class="chart-legend">
-          <span class="legend-item"><span class="dot dot-cyan"></span>avg H</span>
-          <span class="legend-item"><span class="line line-amber"></span>umbral 5.0</span>
-          <span class="legend-item"><span class="dot dot-red"></span>anomalía</span>
-        </span>
+    <section class="timeline">
+      <div class="chart-strip">
+        <div class="chart-header">
+          <span class="chart-title">Entropía · últimos 30 min</span>
+          <span class="chart-legend">
+            <span class="legend-item"><span class="dot dot-cyan"></span>avg H</span>
+            <span class="legend-item"><span class="line line-amber"></span>umbral 5.0</span>
+            <span class="legend-item"><span class="dot dot-red"></span>anomalía</span>
+          </span>
+        </div>
+        <div id="chart-container" class="chart-container"></div>
       </div>
-      <div id="chart-container" class="chart-container"></div>
+      <section class="ticker" id="ticker"></section>
     </section>
-
-    <section class="ticker" id="ticker"></section>
 
     <!-- Modal de aislamiento de segmento (touch-to-isolate) -->
     <div id="node-modal" class="modal hidden">

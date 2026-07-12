@@ -19,22 +19,24 @@ body {
   font: 13px/1.5 ui-monospace, "JetBrains Mono", Consolas, monospace;
   overflow: hidden;
   display: grid;
-  /* header · stats · hero · chart-strip · ticker */
-  grid-template-rows: auto auto 1fr auto auto;
+  /* header · kpi-band · hero · timeline */
+  grid-template-rows: auto auto 1fr auto;
   height: 100vh;
 }
 
 header {
   display: flex; gap: 16px; align-items: center;
   border-bottom: 1px solid var(--border);
-  padding: 10px 16px;
-  background: rgba(15, 22, 38, 0.6);
+  padding: 12px 18px;
+  background: linear-gradient(180deg, rgba(19, 28, 48, 0.9), rgba(15, 22, 38, 0.5));
 }
+header .brand { display: flex; align-items: baseline; gap: 12px; }
 header h1 {
-  font-size: 14px; margin: 0; color: var(--cyan);
-  letter-spacing: 2px; font-weight: 600;
+  font-size: 15px; margin: 0; color: var(--cyan);
+  letter-spacing: 3px; font-weight: 700;
 }
 header .sub { color: var(--muted); font-size: 11px; letter-spacing: 1px; }
+header .header-meta { display: flex; align-items: center; gap: 10px; }
 
 .badge {
   font-size: 11px; padding: 4px 10px; border-radius: 3px;
@@ -55,55 +57,87 @@ button:hover { background: var(--cyan); color: var(--bg); }
 
 .spacer { flex: 1; }
 
-.stats {
-  display: grid; grid-template-columns: repeat(5, 1fr); gap: 1px;
-  background: var(--border);
+/* --- Banda de KPIs agrupados (Detección / Respuesta / Señal) --- */
+.kpi-band {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  padding: 12px 18px;
   border-bottom: 1px solid var(--border);
+  background: rgba(15, 22, 38, 0.25);
 }
-.stat { background: var(--bg); padding: 12px 16px; }
-.stat .label {
+.kpi-group {
+  flex: 1 1 0;
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 0 22px;
+}
+.kpi-group:first-child { padding-left: 0; }
+.kpi-group:last-child  { padding-right: 0; }
+.kpi-group + .kpi-group { border-left: 1px solid var(--border); }
+.kpi-group-label {
+  font-size: 9px; letter-spacing: 2.5px; text-transform: uppercase;
+  color: var(--muted); opacity: 0.85;
+}
+.kpi-cluster { display: flex; gap: 10px; flex: 1; }
+.kpi {
+  flex: 1 1 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 14px;
+  display: flex; flex-direction: column; justify-content: center;
+  min-width: 0;
+}
+.kpi-label {
   font-size: 10px; color: var(--muted);
-  text-transform: uppercase; letter-spacing: 2px;
+  text-transform: uppercase; letter-spacing: 1.5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.stat .value {
-  font-size: 26px; color: var(--cyan); margin-top: 4px;
-  font-variant-numeric: tabular-nums;
+.kpi-value {
+  font-size: 28px; color: var(--cyan); margin-top: 4px;
+  font-variant-numeric: tabular-nums; line-height: 1.1;
   transition: color 0.3s;
 }
-.stat .sub {
-  font-size: 10px; color: var(--muted); margin-top: 2px;
-  letter-spacing: 1px;
+.kpi-sub {
+  font-size: 10px; color: var(--muted); margin-top: 3px;
+  letter-spacing: 0.5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.stat.alert .value { color: var(--red); }
-.stat.warn  .value { color: var(--amber); }
+.kpi.alert { border-color: rgba(255, 77, 109, 0.5); }
+.kpi.alert .kpi-value { color: var(--red); }
+.kpi.warn  { border-color: rgba(245, 193, 75, 0.45); }
+.kpi.warn  .kpi-value { color: var(--amber); }
 /* Estados del detector híbrido (tarjeta Detector ML) */
-#stat-ml.ok    .sub { color: var(--cyan); }
-#stat-ml.warn  .sub { color: var(--amber); }
-#stat-ml.alert .value, #stat-ml.alert .sub { color: var(--red); }
+#stat-ml.ok    { border-color: rgba(94, 224, 214, 0.4); }
+#stat-ml.ok    .kpi-sub { color: var(--cyan); }
+#stat-ml.warn  .kpi-sub { color: var(--amber); }
+#stat-ml.alert .kpi-value, #stat-ml.alert .kpi-sub { color: var(--red); }
 
 /* --- Hero: malla + sidebar --- */
 .hero {
   display: grid;
-  grid-template-columns: 1fr 380px;
-  gap: 1px;
-  background: var(--border);
+  grid-template-columns: 1fr 400px;
+  gap: 12px;
+  padding: 12px 18px;
   overflow: hidden;
   min-height: 0;
 }
 .view {
   position: relative;
   background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
   overflow: hidden;
 }
 .view canvas { display: block; width: 100% !important; height: 100% !important; }
-.view .label {
-  position: absolute; top: 12px; left: 14px;
+.view-label {
+  position: absolute; top: 14px; left: 16px;
   font-size: 11px; color: var(--muted);
   letter-spacing: 2px; pointer-events: none;
   text-transform: uppercase;
   z-index: 5;
 }
-.view .label .key { color: var(--cyan); margin-right: 6px; }
+.view-label .key { color: var(--cyan); margin-right: 6px; }
 
 /* --- Etiquetas CSS2D de los nodos de topología --- */
 .node-label {
@@ -218,28 +252,34 @@ button:hover { background: var(--cyan); color: var(--bg); }
 /* Cursor pointer sobre el canvas para indicar interactividad */
 #canvas-mesh { cursor: pointer; }
 
-/* --- Sidebar de paneles --- */
+/* --- Sidebar de paneles (centro de respuesta) --- */
 .sidebar {
   display: flex;
   flex-direction: column;
-  gap: 1px;
-  background: var(--border);
+  gap: 12px;
   min-height: 0;
 }
 .panel {
-  background: var(--bg);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
   display: flex; flex-direction: column;
   flex: 1 1 0;
-  min-height: 80px;
+  min-height: 90px;
+  overflow: hidden;
 }
+/* El panel de mayor prioridad operativa (amenazas) se marca con un
+   acento sutil en el borde superior para anclarlo visualmente. */
+.panel-priority { border-top: 2px solid rgba(255, 77, 109, 0.55); }
 .panel-header {
-  padding: 10px 14px;
+  padding: 11px 14px;
   border-bottom: 1px solid var(--border);
   display: flex; align-items: center; gap: 8px;
+  background: rgba(7, 11, 20, 0.35);
 }
 .panel-header .title {
   font-size: 10px; letter-spacing: 2px;
-  text-transform: uppercase; color: var(--muted);
+  text-transform: uppercase; color: var(--text);
 }
 .panel-header .count {
   font-size: 10px; color: var(--cyan);
@@ -353,16 +393,21 @@ button:hover { background: var(--cyan); color: var(--bg); }
   text-align: center; font-style: italic;
 }
 
-/* --- Chart strip de timeseries --- */
-.chart-strip {
+/* --- Banda temporal: gráfica de entropía + ticker de eventos --- */
+.timeline {
   border-top: 1px solid var(--border);
   background: rgba(15, 22, 38, 0.4);
+  display: flex; flex-direction: column;
+}
+
+/* --- Chart strip de timeseries --- */
+.chart-strip {
   display: grid; grid-template-rows: 26px 1fr;
-  height: 110px;
+  height: 108px;
 }
 .chart-header {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 4px 14px;
+  padding: 4px 18px;
   border-bottom: 1px solid var(--border);
 }
 .chart-title {
@@ -392,9 +437,8 @@ button:hover { background: var(--cyan); color: var(--bg); }
 /* --- Ticker inferior --- */
 .ticker {
   border-top: 1px solid var(--border);
-  padding: 6px 16px;
+  padding: 6px 18px;
   display: flex; gap: 12px; overflow-x: auto;
-  background: rgba(15, 22, 38, 0.4);
   white-space: nowrap;
   height: 38px;
   align-items: center;

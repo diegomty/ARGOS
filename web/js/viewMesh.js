@@ -1,6 +1,10 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { buildTopology } from './topologyLayer.js';
 
 // Stefan Gustavson 3D simplex noise — implementación canónica.
@@ -69,16 +73,24 @@ const VS = NOISE_GLSL + /* glsl */`
     vec3 p = position;
 
     // Intensidad del caos = entropía normalizada + pulso de anomalía.
-    float intensity = clamp((uH - 3.0) / 2.5, 0.0, 1.5) + uPulse * 0.6;
+    // Ceiling acotado para que la membrana nunca se infle de forma grotesca.
+    float intensity = clamp((uH - 3.0) / 2.5, 0.0, 1.0) + uPulse * 0.35;
 
     // Dos octavas de simplex 3D para textura visual rica.
     float n  = snoise(p * 1.2 + vec3(uTime * 0.25));
     float n2 = snoise(p * 2.8 + vec3(uTime * 0.55)) * 0.45;
-    float disp = (n + n2) * intensity * 0.35;
+    // Clamp ASIMÉTRICO: la membrana puede abultarse hacia afuera (+0.18)
+    // pero apenas hundirse hacia adentro (-0.05). Así su radio mínimo es
+    // ~1.45 > radio del nodo más externo (1.40), garantizando que NINGÚN
+    // nodo del perímetro quede fuera de la malla por mucha entropía que haya.
+    float disp = (n + n2) * intensity * 0.16;
+    disp = clamp(disp, -0.05, 0.18);
 
-    // Onda de choque desde la dirección del atacante en bloqueo.
+    // Onda de choque desde la dirección del atacante en bloqueo. Siempre
+    // hacia afuera (uBlockPulse y smoothstep son >= 0), cono estrecho:
+    // marca la dirección sin hundir la esfera ni deformarla de más.
     float dirDot = dot(normalize(p), normalize(uAttackOrigin));
-    float shock = uBlockPulse * smoothstep(0.5, 1.0, dirDot) * 0.5;
+    float shock = uBlockPulse * smoothstep(0.6, 1.0, dirDot) * 0.12;
 
     p += normal * (disp + shock);
 
@@ -109,22 +121,29 @@ const FS = /* glsl */`
     vec3 base = colorForH(uH);
 
     // Las crestas (vDisp positivo grande) se iluminan más; las grietas
-    // se oscurecen. Da textura sin tener que muestrear normales.
-    float ridge = clamp(vDisp * 1.5, -0.4, 0.6);
-    vec3 col = base * (1.0 + ridge * 1.3);
+    // se oscurecen. Ganancia moderada para no saturar el bloom.
+    float ridge = clamp(vDisp * 1.5, -0.4, 0.5);
+    vec3 col = base * (1.0 + ridge * 0.8);
 
-    // Fresnel: el borde brilla más, efecto de "globo de datos".
+    // Fresnel: el borde se insinúa apenas (efecto "globo de datos"), pero
+    // suave para no saturar el bloom — la membrana debe leerse translúcida
+    // y oscura, no como un foco.
     vec3 viewDir = normalize(-vViewPos);
-    float fres = pow(1.0 - max(dot(vNormal, viewDir), 0.0), 2.5);
-    col += base * fres * 0.7;
+    float fres = pow(1.0 - max(dot(vNormal, viewDir), 0.0), 3.0);
+    col += base * fres * 0.28;
 
-    // Flash blanco breve durante anomalía
-    col += vec3(uPulse * 0.25);
+    // Flash blanco breve durante anomalía — tenue, para que el bloom no lo
+    // convierta en un fogonazo cegador al inyectar eventos.
+    col += vec3(uPulse * 0.08);
 
-    // La membrana es semi-transparente para dejar ver la topología
-    // interna; se vuelve más opaca durante anomalías para reforzar el
-    // efecto de "encierro".
-    float alpha = 0.32 + uPulse * 0.35 + fres * 0.25;
+    // Atenuación global: mantiene el color por debajo del umbral de bloom en
+    // las zonas planas (solo crestas/fresnel florecen), evitando el blanqueo.
+    col *= 0.82;
+
+    // La membrana es muy semi-transparente para dejar ver la topología
+    // interna; se vuelve algo más opaca durante anomalías para reforzar el
+    // efecto de "encierro" — sin llegar a taparlo todo.
+    float alpha = 0.15 + uPulse * 0.22 + fres * 0.16;
     gl_FragColor = vec4(col, alpha);
   }
 `;
@@ -140,6 +159,21 @@ export class MeshView {
 
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+    // --- Post-procesado: bloom para el glow neuronal ---
+    // RenderPass dibuja la escena; UnrealBloomPass extrae lo más brillante
+    // (núcleos de nodos, sinapsis, fresnel de la membrana) y lo difumina;
+    // OutputPass corrige el espacio de color sRGB al final de la cadena.
+    // Threshold ALTO (0.62): solo los píxeles realmente brillantes —los
+    // núcleos puntuales y las cabezas de sinapsis— florecen. La membrana y
+    // los halos tenues quedan por debajo del umbral y no se saturan. Strength
+    // bajo (0.35) para un glow sutil tipo "puntos de luz", no manchas.
+    this.composer = new EffectComposer(this.renderer);
+    this.composer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.composer.addPass(new RenderPass(this.scene, this.camera));
+    this.bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.35, 0.4, 0.62);
+    this.composer.addPass(this.bloom);
+    this.composer.addPass(new OutputPass());
 
     this.controls = new OrbitControls(this.camera, canvas);
     this.controls.enableDamping = true;
@@ -239,6 +273,7 @@ export class MeshView {
 
   resize(w, h) {
     this.renderer.setSize(w, h, false);
+    this.composer.setSize(w, h);
     this.labelRenderer.setSize(w, h);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
@@ -260,7 +295,9 @@ export class MeshView {
   }
 
   render() {
-    this.renderer.render(this.scene, this.camera);
+    // El bloom se aplica vía composer en lugar del render directo; las
+    // etiquetas HTML (CSS2D) se dibujan encima, sin pasar por el bloom.
+    this.composer.render();
     this.labelRenderer.render(this.scene, this.camera);
   }
 }

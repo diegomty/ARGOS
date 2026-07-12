@@ -1,0 +1,52 @@
+# GitHub Action que genera el "snake" de contribuciones cada día.
+#
+# DÓNDE COLOCARLO:
+#   En tu repo de perfil `diegomty/diegomty`, en la ruta:
+#     .github/workflows/snake.yml
+#
+# CÓMO FUNCIONA:
+#   * Corre cada 12 horas + manualmente con "Run workflow" + en cada push a main
+#   * Lee tu contribution graph público
+#   * Genera 2 SVGs (light y dark) — sin GIF para evitar el bug del módulo canvas
+#   * Los publica en la rama `output` del mismo repo
+#   * El README los referencia con <picture> y srcset para tema claro/oscuro
+
+name: Generate Snake
+
+on:
+  # Cada 12 horas — UTC. Suficiente para mantener el snake actualizado.
+  schedule:
+    - cron: "0 */12 * * *"
+  # Permite ejecutar manualmente desde la pestaña Actions
+  workflow_dispatch:
+  # Regenera en cada push a main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # `Platane/snk@v3` (sin /svg-only) — el subpath svg-only tiene un bug
+      # en v3 donde no resuelve el módulo `canvas` en el runner.
+      # Quitamos también el output .gif por el mismo motivo.
+      - name: Generate snake SVGs
+        uses: Platane/snk@v3
+        with:
+          github_user_name: ${{ github.repository_owner }}
+          outputs: |
+            dist/github-snake.svg
+            dist/github-snake-dark.svg?palette=github-dark
+
+      - name: Push SVGs a la rama output
+        uses: crazy-max/ghaction-github-pages@v4
+        with:
+          target_branch: output
+          build_dir: dist
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
