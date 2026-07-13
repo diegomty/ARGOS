@@ -51,13 +51,23 @@ const chart = new TimeseriesChart(document.getElementById('chart-container'));
 chart.start();
 
 // --- Render loop ---
+// El gemelo 3D solo se actualiza/renderiza cuando su vista ("centinela") está
+// visible; en otras vistas (p. ej. el Mapa) se pausa para liberar GPU/CPU y
+// evitar que dos bucles de animación compitan. El estado (WS) sigue llegando.
+let centinelaActive = true;
+document.addEventListener('viewchange', (e) => {
+  centinelaActive = e.detail.id === 'centinela';
+});
+
 let last = performance.now();
 function loop(now) {
   const dt = Math.min((now - last) / 1000, 0.1);
   last = now;
-  tick(dt);
-  view.update(state, dt, now / 1000);
-  view.render();
+  if (centinelaActive) {
+    tick(dt);
+    view.update(state, dt, now / 1000);
+    view.render();
+  }
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
@@ -170,6 +180,9 @@ function connect() {
       noteFlowVerdict(msg.payload);
       view.spawnFlow(msg.payload);
     }
+    // Reemite el mensaje como evento del DOM para que otros módulos de la
+    // consola (Flujos, Anomalías…) se suscriban sin acoplarse a este archivo.
+    document.dispatchEvent(new CustomEvent('qs:' + msg.kind, { detail: msg.payload }));
   };
 }
 connect();

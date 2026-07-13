@@ -19,8 +19,8 @@ body {
   font: 13px/1.5 ui-monospace, "JetBrains Mono", Consolas, monospace;
   overflow: hidden;
   display: grid;
-  /* header · kpi-band · hero · timeline */
-  grid-template-rows: auto auto 1fr auto;
+  /* header · workspace (barra + viewport de vistas) */
+  grid-template-rows: auto 1fr;
   height: 100vh;
 }
 
@@ -37,6 +37,119 @@ header h1 {
 }
 header .sub { color: var(--muted); font-size: 11px; letter-spacing: 1px; }
 header .header-meta { display: flex; align-items: center; gap: 10px; }
+
+/* --- Shell modular: barra vertical de módulos + viewport de vistas --- */
+.workspace {
+  display: grid;
+  grid-template-columns: 78px 1fr;
+  min-height: 0;
+  overflow: hidden;
+}
+.rail {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 10px 8px;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+}
+.rail-spacer { flex: 1; }
+.rail-item {
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+  padding: 10px 4px; border-radius: 8px;
+  background: transparent; border: 1px solid transparent;
+  color: var(--muted); cursor: pointer; font-family: inherit;
+  transition: color .15s, background .15s, border-color .15s;
+}
+.rail-ico { font-size: 18px; line-height: 1; }
+.rail-txt { font-size: 9px; letter-spacing: 1px; text-transform: uppercase; }
+.rail-item:hover:not(:disabled) { color: var(--text); background: rgba(94, 224, 214, 0.06); }
+.rail-item.active {
+  color: var(--cyan);
+  border-color: rgba(94, 224, 214, 0.4);
+  background: rgba(94, 224, 214, 0.1);
+}
+.rail-item.is-soon, .rail-item:disabled { opacity: 0.3; cursor: not-allowed; }
+
+.viewport { position: relative; min-height: 0; overflow: hidden; }
+.view { display: none; height: 100%; min-height: 0; }
+.view.active { display: grid; }
+.view-centinela { grid-template-rows: auto 1fr auto; }  /* kpi · hero · timeline */
+.view-map { grid-template-rows: 1fr; }
+
+/* --- Vista Mapa de Red (el render del grafo se añade en L-2) --- */
+.map-shell { display: grid; grid-template-rows: auto 1fr; min-height: 0; }
+.map-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 18px; border-bottom: 1px solid var(--border);
+}
+.map-title { font-size: 12px; letter-spacing: 2px; text-transform: uppercase; color: var(--text); }
+.map-title .key { color: var(--cyan); margin-right: 8px; }
+.map-hint { font-size: 10px; color: var(--muted); letter-spacing: 1px; }
+.map-tools { display: flex; align-items: center; gap: 14px; }
+.map-btn { padding: 5px 12px; font-size: 11px; letter-spacing: 1px; }
+.map-canvas-wrap { position: relative; min-height: 0; overflow: hidden; background: var(--bg); }
+#map-canvas { display: block; width: 100%; height: 100%; }
+.map-empty {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  color: var(--muted); font-size: 12px; letter-spacing: 1px; pointer-events: none;
+}
+#map-canvas { cursor: grab; }
+.map-tip {
+  position: absolute; z-index: 10; pointer-events: none;
+  background: rgba(7, 11, 20, 0.92);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px 10px; max-width: 260px;
+  font-size: 11px; line-height: 1.5; color: var(--text);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+}
+.map-tip b { color: var(--cyan); letter-spacing: 1px; }
+.map-tip .tip-ip { color: var(--muted); margin-left: 8px; font-size: 10px; }
+.map-tip .tip-k {
+  color: var(--muted); text-transform: uppercase; font-size: 9px;
+  letter-spacing: 1px; margin-right: 6px;
+}
+.map-tip .tip-warn { color: var(--red); margin-top: 3px; }
+.map-tip .tip-hint { color: var(--cyan); margin-top: 5px; font-size: 9px; letter-spacing: 1px; opacity: 0.8; }
+
+/* --- Vistas de tabla (Flujos, Anomalías) --- */
+.view-flujos, .view-anomalias { grid-template-rows: 1fr; }
+.table-shell { display: grid; grid-template-rows: auto 1fr; min-height: 0; }
+.table-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 18px; border-bottom: 1px solid var(--border);
+}
+.table-wrap { position: relative; min-height: 0; overflow: auto; }
+.table-wrap::-webkit-scrollbar { width: 6px; height: 6px; }
+.table-wrap::-webkit-scrollbar-thumb { background: var(--border); }
+.data-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.data-table thead th {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--panel); text-align: left;
+  padding: 9px 14px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 1px; font-size: 9px;
+  border-bottom: 1px solid var(--border);
+}
+.data-table th.num { text-align: right; }
+.data-table td { padding: 6px 14px; border-bottom: 1px solid rgba(31, 42, 68, 0.4); }
+.data-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.data-table td.mono { font-family: ui-monospace, "JetBrains Mono", Consolas, monospace; }
+.data-table td.muted { color: var(--muted); }
+.data-table tbody tr:hover { background: rgba(94, 224, 214, 0.04); }
+.data-table tr.flow-anom { background: rgba(255, 77, 109, 0.08); }
+.badge-anom {
+  background: rgba(255, 77, 109, 0.15); color: var(--red);
+  padding: 1px 7px; border-radius: 3px; font-size: 10px; letter-spacing: 0.5px;
+}
+.badge-ok { color: var(--muted); font-size: 10px; }
+.badge-tipo {
+  font-size: 9px; letter-spacing: 1px; text-transform: uppercase;
+  padding: 1px 7px; border-radius: 3px;
+}
+.badge-tipo.evento { background: rgba(245, 193, 75, 0.15); color: var(--amber); }
+.badge-tipo.flujo  { background: rgba(255, 77, 109, 0.15); color: var(--red); }
+.table-empty {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  color: var(--muted); font-size: 12px; letter-spacing: 1px; pointer-events: none;
+}
 
 .badge {
   font-size: 11px; padding: 4px 10px; border-radius: 3px;
@@ -122,14 +235,14 @@ button:hover { background: var(--cyan); color: var(--bg); }
   overflow: hidden;
   min-height: 0;
 }
-.view {
+.stage {
   position: relative;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
 }
-.view canvas { display: block; width: 100% !important; height: 100% !important; }
+.stage canvas { display: block; width: 100% !important; height: 100% !important; }
 .view-label {
   position: absolute; top: 14px; left: 16px;
   font-size: 11px; color: var(--muted);

@@ -27,6 +27,29 @@
       </div>
     </header>
 
+    <div class="workspace">
+      <nav class="rail">
+        <button class="rail-item active" data-view="centinela" title="Centinela · gemelo digital">
+          <span class="rail-ico">◉</span><span class="rail-txt">Centinela</span>
+        </button>
+        <button class="rail-item" data-view="map" title="Mapa de red autodescubierto">
+          <span class="rail-ico">◈</span><span class="rail-txt">Mapa</span>
+        </button>
+        <button class="rail-item" data-view="flujos" title="Flujos NetFlow en vivo">
+          <span class="rail-ico">⇄</span><span class="rail-txt">Flujos</span>
+        </button>
+        <button class="rail-item" data-view="anomalias" title="Anomalías detectadas">
+          <span class="rail-ico">△</span><span class="rail-txt">Anomalías</span>
+        </button>
+        <span class="rail-spacer"></span>
+        <button class="rail-item is-soon" disabled title="Próximamente">
+          <span class="rail-ico">⚙</span><span class="rail-txt">Config</span>
+        </button>
+      </nav>
+
+      <div class="viewport">
+        <section class="view view-centinela active" data-view="centinela">
+
     <section class="kpi-band">
       <div class="kpi-group">
         <div class="kpi-group-label">Detección</div>
@@ -68,8 +91,8 @@
       </div>
     </section>
 
-    <main class="hero">
-      <div class="view">
+    <div class="hero">
+      <div class="stage">
         <div class="view-label"><span class="key">▶</span>Digital Twin · Topología en vivo</div>
         <canvas id="canvas-mesh"></canvas>
       </div>
@@ -109,7 +132,7 @@
           <div class="panel-body" id="hash-stream"></div>
         </div>
       </aside>
-    </main>
+    </div>
 
     <section class="timeline">
       <div class="chart-strip">
@@ -125,6 +148,63 @@
       </div>
       <section class="ticker" id="ticker"></section>
     </section>
+        </section><!-- /view-centinela -->
+
+        <section class="view view-map" data-view="map">
+          <div class="map-shell">
+            <div class="map-header">
+              <span class="map-title"><span class="key">◈</span>Mapa de Red · Topología autodescubierta</span>
+              <div class="map-tools">
+                <button id="map-organize" class="map-btn" title="Reacomodo automático agrupado por zona">⟳ Organizar</button>
+                <span class="map-hint" id="map-status">—</span>
+              </div>
+            </div>
+            <div class="map-canvas-wrap">
+              <canvas id="map-canvas"></canvas>
+              <div class="map-empty" id="map-empty">Construyendo el mapa desde los flujos observados…</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="view view-flujos" data-view="flujos">
+          <div class="table-shell">
+            <div class="table-header">
+              <span class="map-title"><span class="key">⇄</span>Flujos NetFlow · en vivo</span>
+              <span class="map-hint" id="flujos-status">—</span>
+            </div>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead><tr>
+                  <th>Hora</th><th>Origen</th><th>Destino</th><th>Servicio</th>
+                  <th class="num">Paq.</th><th class="num">Bytes</th>
+                  <th class="num">Dur.</th><th>Detector ML</th>
+                </tr></thead>
+                <tbody id="flujos-body"></tbody>
+              </table>
+              <div class="table-empty" id="flujos-empty">Esperando flujos… (genera tráfico o abre el lab)</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="view view-anomalias" data-view="anomalias">
+          <div class="table-shell">
+            <div class="table-header">
+              <span class="map-title"><span class="key">△</span>Anomalías · detección en vivo</span>
+              <span class="map-hint" id="anom-status">—</span>
+            </div>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead><tr>
+                  <th>Hora</th><th>Tipo</th><th>Origen</th><th>Detalle</th><th>Detector / Plan</th>
+                </tr></thead>
+                <tbody id="anom-body"></tbody>
+              </table>
+              <div class="table-empty" id="anom-empty">Sin anomalías detectadas — el sistema está en calma</div>
+            </div>
+          </div>
+        </section>
+      </div><!-- /viewport -->
+    </div><!-- /workspace -->
 
     <!-- Modal de aislamiento de segmento (touch-to-isolate) -->
     <div id="node-modal" class="modal hidden">
@@ -165,5 +245,9 @@
     </div>
 
     <script type="module" src="/js/main.js"></script>
+    <script type="module" src="/js/console.js"></script>
+    <script type="module" src="/js/mapview.js"></script>
+    <script type="module" src="/js/flowsview.js"></script>
+    <script type="module" src="/js/anomaliesview.js"></script>
   </body>
 </html>
