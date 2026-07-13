@@ -60,6 +60,13 @@ ROLE_RULES: List[tuple] = [
 SCANNER_MIN_TARGETS = 20
 SCANNER_MAX_AVG_BYTES = 600
 
+# Un puerto cuenta como "servicio expuesto" (y no como un simple sondeo de
+# escaneo) si es conocido, si lo consumieron varios clientes distintos, o si
+# movió tráfico significativo. Este último criterio conserva puertos como el
+# 4444 de un C2 (un solo cliente pero volumen enorme por exfiltración) y
+# descarta los puertos que un port scan tocó una vez con unos pocos bytes.
+SERVICE_MIN_BYTES = 100_000
+
 
 def _zone_of(ip: str) -> str:
     """Zona = red /24 del host (agrupador visual básico)."""
@@ -105,6 +112,8 @@ def build_graph(flows: List[Dict[str, Any]]) -> Dict[str, Any]:
     n_last: Dict[str, float] = {}
     # puerto expuesto -> conjunto de clientes distintos que lo consumieron
     n_served: Dict[str, Dict[int, set]] = defaultdict(lambda: defaultdict(set))
+    # puerto expuesto -> bytes acumulados (para distinguir servicio de sondeo)
+    n_served_bytes: Dict[str, Dict[int, int]] = defaultdict(lambda: defaultdict(int))
     # como cliente: destinos y (destino,puerto) distintos que tocó
     n_client_dsts: Dict[str, set] = defaultdict(set)
     n_client_targets: Dict[str, set] = defaultdict(set)  # (dst_ip, dst_port)
@@ -128,6 +137,7 @@ def build_graph(flows: List[Dict[str, Any]]) -> Dict[str, Any]:
         if dp < EPHEMERAL_MIN:
             n_client_targets[s].add((d, dp))
             n_served[d][dp].add(s)
+            n_served_bytes[d][dp] += b
 
         for node in (s, d):
             if ts:
@@ -155,11 +165,26 @@ def build_graph(flows: List[Dict[str, Any]]) -> Dict[str, Any]:
         avg_out = (n_bytes_out.get(ip, 0) / out_flows) if out_flows else 0
         is_scanner = targets >= SCANNER_MIN_TARGETS and avg_out <= SCANNER_MAX_AVG_BYTES
 
-        services = [
-            {"port": p, "name": _service_name(p), "clients": len(clients)}
-            for p, clients in sorted(served.items(), key=lambda kv: -len(kv[1]))
-        ]
-        role = _infer_role(served_ports, is_scanner, fanout, bool(served_ports))
+        # Distinguir servicios reales de puertos meramente sondeados.
+        served_bytes = n_served_bytes.get(ip, {})
+        services = []
+        real_ports: set[int] = set()
+        probed = 0
+        for p, clients in served.items():
+            if p == 0:
+                continue  # puerto 0 = flujos ICMP/sin puerto, no es un servicio
+            c = len(clients)
+            bts = served_bytes.get(p, 0)
+            is_real = (p in PORT_SERVICES) or (c >= 2) or (bts >= SERVICE_MIN_BYTES)
+            if not is_real:
+                probed += 1
+                continue
+            services.append({"port": p, "name": _service_name(p),
+                             "clients": c, "bytes": bts})
+            real_ports.add(p)
+        services.sort(key=lambda s: (-s["clients"], -s["bytes"]))
+
+        role = _infer_role(real_ports, is_scanner, fanout, bool(real_ports))
         total_flows = n_flows_in.get(ip, 0) + out_flows
 
         nodes.append({
@@ -172,9 +197,11 @@ def build_graph(flows: List[Dict[str, Any]]) -> Dict[str, Any]:
             "bytes_out": n_bytes_out.get(ip, 0),
             "flows": total_flows,
             "fanout": fanout,
+            "probed_ports": probed,
             "first_seen": n_first.get(ip),
             "last_seen": n_last.get(ip),
             "is_scanner": is_scanner,
+            "is_scan_target": probed >= SCANNER_MIN_TARGETS,
             "confidence": round(min(1.0, total_flows / 20.0), 2),
             "source": "passive",
         })
