@@ -73,7 +73,9 @@ function resize() {
 
 async function load() {
   try {
-    const g = await fetch('/api/discovery?min_flows=2').then(r => r.json());
+    // min_flows configurable desde el módulo Config (persistido en localStorage).
+    const mf = localStorage.getItem('qs_min_flows') || '2';
+    const g = await fetch(`/api/discovery?min_flows=${encodeURIComponent(mf)}`).then(r => r.json());
     const cx = W / 2, cy = H / 2;
     nodes = g.nodes.map((n, i) => {
       const a = (i / g.nodes.length) * Math.PI * 2;
@@ -323,9 +325,10 @@ function organize() {
   alpha = 0; fitted = false; userInteracted = false;
 }
 
-async function onShow() {
+function onShow() {
   resize();
-  if (!loaded || Date.now() - lastFetch > 10000) await load();
+  // No cargamos automáticamente: el mapeo lo dispara el botón "Analizar red".
+  // Así se respeta el flujo "ok, empecemos a analizar esta red".
   if (!running) { running = true; frame(); }
 }
 
@@ -436,15 +439,31 @@ canvas.addEventListener('dblclick', (e) => {
   else { clearFocus(); organize(); }   // doble clic en vacío = reorganizar
 });
 
-// Botón "Organizar" de la cabecera: reacomodo automático agrupado.
+// Botón "Analizar red": dispara el mapeo (descubre + dibuja la topología real).
+const analyzeBtn = document.getElementById('map-analyze');
+if (analyzeBtn) analyzeBtn.addEventListener('click', async () => {
+  statusEl.textContent = 'analizando la red…';
+  await load();   // fetch /api/discovery + organize()
+});
+
+// Botón "Organizar": reacomodo automático agrupado (relayout).
 const organizeBtn = document.getElementById('map-organize');
 if (organizeBtn) organizeBtn.addEventListener('click', () => organize());
 
 // --- Ciclo de vida atado a la conmutación de vistas ---
+// La vista de red usa el id "centinela" (era la principal); arranca al mostrarse
+// y se pausa en otras vistas para no gastar CPU.
 document.addEventListener('viewchange', (e) => {
-  if (e.detail.id === 'map') onShow();
+  if (e.detail.id === 'centinela') onShow();
   else stop();
 });
 window.addEventListener('resize', () => {
   if (running) resize();
 });
+
+// La vista de red es la principal (activa por defecto): arrancamos el lienzo al
+// cargar, tras el layout, para que muestre el estado vacío con su llamada a
+// "Analizar red". No hay evento viewchange en la carga inicial.
+if (document.querySelector('.view-centinela.active')) {
+  requestAnimationFrame(onShow);
+}

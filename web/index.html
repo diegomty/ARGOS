@@ -29,11 +29,8 @@
 
     <div class="workspace">
       <nav class="rail">
-        <button class="rail-item active" data-view="centinela" title="Centinela · gemelo digital">
-          <span class="rail-ico">◉</span><span class="rail-txt">Centinela</span>
-        </button>
-        <button class="rail-item" data-view="map" title="Mapa de red autodescubierto">
-          <span class="rail-ico">◈</span><span class="rail-txt">Mapa</span>
+        <button class="rail-item active" data-view="centinela" title="Red · topología en vivo autodescubierta">
+          <span class="rail-ico">◈</span><span class="rail-txt">Red</span>
         </button>
         <button class="rail-item" data-view="flujos" title="Flujos NetFlow en vivo">
           <span class="rail-ico">⇄</span><span class="rail-txt">Flujos</span>
@@ -42,7 +39,7 @@
           <span class="rail-ico">△</span><span class="rail-txt">Anomalías</span>
         </button>
         <span class="rail-spacer"></span>
-        <button class="rail-item is-soon" disabled title="Próximamente">
+        <button class="rail-item" data-view="config" title="Configuración y estado">
           <span class="rail-ico">⚙</span><span class="rail-txt">Config</span>
         </button>
       </nav>
@@ -93,8 +90,20 @@
 
     <div class="hero">
       <div class="stage">
-        <div class="view-label"><span class="key">▶</span>Digital Twin · Topología en vivo</div>
-        <canvas id="canvas-mesh"></canvas>
+        <div class="map-shell">
+          <div class="map-header">
+            <span class="map-title"><span class="key">◈</span>Red · Topología en vivo</span>
+            <div class="map-tools">
+              <button id="map-analyze" class="map-btn">▶ Analizar red</button>
+              <button id="map-organize" class="map-btn">⟳ Organizar</button>
+              <span class="map-hint" id="map-status">—</span>
+            </div>
+          </div>
+          <div class="map-canvas-wrap">
+            <canvas id="map-canvas"></canvas>
+            <div class="map-empty" id="map-empty">Pulsa «▶ Analizar red» para mapear la red observada</div>
+          </div>
+        </div>
       </div>
 
       <aside class="sidebar">
@@ -148,23 +157,7 @@
       </div>
       <section class="ticker" id="ticker"></section>
     </section>
-        </section><!-- /view-centinela -->
-
-        <section class="view view-map" data-view="map">
-          <div class="map-shell">
-            <div class="map-header">
-              <span class="map-title"><span class="key">◈</span>Mapa de Red · Topología autodescubierta</span>
-              <div class="map-tools">
-                <button id="map-organize" class="map-btn" title="Reacomodo automático agrupado por zona">⟳ Organizar</button>
-                <span class="map-hint" id="map-status">—</span>
-              </div>
-            </div>
-            <div class="map-canvas-wrap">
-              <canvas id="map-canvas"></canvas>
-              <div class="map-empty" id="map-empty">Construyendo el mapa desde los flujos observados…</div>
-            </div>
-          </div>
-        </section>
+        </section><!-- /view-centinela (Red) -->
 
         <section class="view view-flujos" data-view="flujos">
           <div class="table-shell">
@@ -200,6 +193,45 @@
                 <tbody id="anom-body"></tbody>
               </table>
               <div class="table-empty" id="anom-empty">Sin anomalías detectadas — el sistema está en calma</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="view view-config" data-view="config">
+          <div class="config-shell">
+            <div class="table-header">
+              <span class="map-title"><span class="key">⚙</span>Configuración y estado</span>
+              <button id="config-refresh" class="map-btn">↻ Actualizar</button>
+            </div>
+            <div class="config-body">
+              <div class="config-card">
+                <div class="config-card-title">Estado del sistema</div>
+                <div class="config-rows" id="config-status">cargando…</div>
+              </div>
+              <div class="config-card">
+                <div class="config-card-title">Acciones</div>
+                <div class="config-actions">
+                  <button id="cfg-retrain" class="btn-action btn-reactivate">Re-entrenar modelo local</button>
+                  <button id="cfg-test-event" class="btn-action btn-reactivate">Inyectar evento de prueba</button>
+                  <button id="cfg-test-flow" class="btn-action btn-isolate">Inyectar flujo anómalo</button>
+                  <div class="config-msg" id="cfg-msg"></div>
+                </div>
+              </div>
+              <div class="config-card">
+                <div class="config-card-title">Ajustes del Mapa de Red</div>
+                <div class="config-field">
+                  <label>Flujos mínimos por nodo (min_flows)</label>
+                  <div class="config-inline">
+                    <input type="number" id="cfg-minflows" min="1" max="100" value="2" />
+                    <button id="cfg-apply-map" class="map-btn">Aplicar</button>
+                  </div>
+                  <div class="config-hint">Filtra el ruido de nodos efímeros. Se aplica al reabrir el Mapa.</div>
+                </div>
+              </div>
+              <div class="config-card">
+                <div class="config-card-title">Parámetros del detector (referencia)</div>
+                <div class="config-rows" id="config-params"></div>
+              </div>
             </div>
           </div>
         </section>
@@ -249,5 +281,6 @@
     <script type="module" src="/js/mapview.js"></script>
     <script type="module" src="/js/flowsview.js"></script>
     <script type="module" src="/js/anomaliesview.js"></script>
+    <script type="module" src="/js/configview.js"></script>
   </body>
 </html>

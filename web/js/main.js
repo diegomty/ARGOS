@@ -1,14 +1,11 @@
-import { state, ingest, tick } from './state.js';
-import { MeshView } from './viewMesh.js';
+// Núcleo del dashboard: WebSocket + KPIs + paneles + gráfica + detector ML.
+// (El gemelo 3D fue retirado; la vista de red ahora es el Mapa autodescubierto,
+//  que vive en su propio módulo mapview.js.)
+
+import { state, ingest } from './state.js';
 import { pushTicker } from './ticker.js';
 import { pushDashboard } from './dashboard.js';
-import { showNodeModal } from './modal.js';
 import { TimeseriesChart } from './chart.js';
-
-// Tipos de nodo que el operador puede aislar desde el digital twin.
-// (El backend rechaza el resto, pero filtramos también acá para no
-// abrir el modal en nodos que no van a poder ejecutar la acción.)
-const ISOLATABLE_TYPES = new Set(['department', 'external']);
 
 // --- Toggle maximizar/restaurar paneles del sidebar ---
 const sidebar = document.querySelector('.sidebar');
@@ -25,56 +22,13 @@ if (sidebar) {
   });
 }
 
-// --- Vista 3D ---
-const canvas = document.getElementById('canvas-mesh');
-const view = new MeshView(canvas);
-
-function resize() {
-  const r = canvas.parentElement.getBoundingClientRect();
-  view.resize(r.width, r.height);
-}
-window.addEventListener('resize', resize);
-resize();
-
-// --- Topología (carga única al arrancar) ---
-fetch('/api/topology')
-  .then(r => r.ok ? r.json() : Promise.reject(r.statusText))
-  .then(topology => {
-    view.setTopology(topology);
-    console.info('[topology]', topology.name, topology.version,
-      `${topology.nodes.length} nodos, ${topology.links.length} links`);
-  })
-  .catch(err => console.warn('[topology] no se pudo cargar:', err));
-
-// --- Chart de timeseries (polling cada 5s + pulse en eventos) ---
+// --- Gráfica de entropía (polling cada 5s) ---
 const chart = new TimeseriesChart(document.getElementById('chart-container'));
 chart.start();
 
-// --- Render loop ---
-// El gemelo 3D solo se actualiza/renderiza cuando su vista ("centinela") está
-// visible; en otras vistas (p. ej. el Mapa) se pausa para liberar GPU/CPU y
-// evitar que dos bucles de animación compitan. El estado (WS) sigue llegando.
-let centinelaActive = true;
-document.addEventListener('viewchange', (e) => {
-  centinelaActive = e.detail.id === 'centinela';
-});
-
-let last = performance.now();
-function loop(now) {
-  const dt = Math.min((now - last) / 1000, 0.1);
-  last = now;
-  if (centinelaActive) {
-    tick(dt);
-    view.update(state, dt, now / 1000);
-    view.render();
-  }
-  requestAnimationFrame(loop);
-}
-requestAnimationFrame(loop);
-
-// --- Stats DOM ---
+// --- KPIs ---
 const $total = document.getElementById('s-total');
-const $anom  = document.getElementById('s-anom');
+const $anom = document.getElementById('s-anom');
 const $blocked = document.getElementById('s-blocked');
 const $h = document.getElementById('s-h');
 const $hStat = document.getElementById('stat-h');
@@ -85,13 +39,10 @@ function refreshStats() {
   $blocked.textContent = state.blockedIps.size;
   $h.textContent = state.rawH.toFixed(2);
   $hStat.classList.toggle('alert', state.rawH > 5.0);
-  $hStat.classList.toggle('warn',  state.rawH > 4.5 && state.rawH <= 5.0);
+  $hStat.classList.toggle('warn', state.rawH > 4.5 && state.rawH <= 5.0);
 }
 
-// --- Tarjeta "Detector ML" (Fase J) ---
-// El conteo de flujos marcados llega en vivo por WS (flow.ml); el estado
-// de los modelos (heredado cargado / línea base local) se refresca por
-// polling porque solo cambia al arrancar o en cada re-entrenamiento.
+// --- Tarjeta "Detector ML" ---
 const $ml = document.getElementById('s-ml');
 const $mlState = document.getElementById('s-ml-state');
 const $mlStat = document.getElementById('stat-ml');
@@ -107,7 +58,6 @@ function noteFlowVerdict(flow) {
 async function refreshMlStatus() {
   try {
     const st = await fetch('/api/ml').then(r => r.json());
-    // El conteo del servidor incluye flujos previos a esta pestaña.
     mlFlagged = st.flagged;
     $ml.textContent = mlFlagged;
     $mlStat.classList.toggle('alert', mlFlagged > 0);
@@ -137,15 +87,6 @@ async function refreshMlStatus() {
 refreshMlStatus();
 setInterval(refreshMlStatus, 10_000);
 
-// --- Estado local de nodos aislados (sincronizado por WS) ---
-const isolatedSet = new Set();
-
-function applyTopologyState(payload) {
-  isolatedSet.clear();
-  for (const id of payload.isolated || []) isolatedSet.add(id);
-  view.setIsolated([...isolatedSet]);
-}
-
 // --- WebSocket con envelope `{kind, payload}` ---
 const $status = document.getElementById('status');
 
@@ -174,14 +115,11 @@ function connect() {
       pushTicker(ev);
       pushDashboard(ev);
       refreshStats();
-    } else if (msg.kind === 'topology_state') {
-      applyTopologyState(msg.payload);
     } else if (msg.kind === 'flow') {
       noteFlowVerdict(msg.payload);
-      view.spawnFlow(msg.payload);
     }
-    // Reemite el mensaje como evento del DOM para que otros módulos de la
-    // consola (Flujos, Anomalías…) se suscriban sin acoplarse a este archivo.
+    // Reemite el mensaje como evento del DOM para que los módulos de la consola
+    // (Mapa, Flujos, Anomalías…) se suscriban sin acoplarse a este archivo.
     document.dispatchEvent(new CustomEvent('qs:' + msg.kind, { detail: msg.payload }));
   };
 }
@@ -190,36 +128,4 @@ connect();
 // --- Botón de evento sintético (debug) ---
 document.getElementById('btn-test').addEventListener('click', () => {
   fetch('/api/test-event', { method: 'POST' });
-});
-
-// --- Touch-to-isolate: click sobre un nodo abre el modal ---
-//
-// Distinguimos click de drag (OrbitControls) midiendo cuánto se movió
-// el cursor entre mousedown y mouseup. Si el movimiento es < 5px, lo
-// tratamos como un click de selección.
-
-let pressPos = null;
-const CLICK_THRESHOLD_PX = 5;
-
-function onPress(x, y) { pressPos = { x, y }; }
-function onRelease(x, y) {
-  if (!pressPos) return;
-  const dx = x - pressPos.x;
-  const dy = y - pressPos.y;
-  pressPos = null;
-  if (Math.abs(dx) > CLICK_THRESHOLD_PX || Math.abs(dy) > CLICK_THRESHOLD_PX) return;
-
-  const node = view.pickNode(x, y);
-  if (!node) return;
-  if (!ISOLATABLE_TYPES.has(node.type)) return;
-  showNodeModal(node, isolatedSet.has(node.id));
-}
-
-canvas.addEventListener('mousedown', e => onPress(e.clientX, e.clientY));
-canvas.addEventListener('mouseup',   e => onRelease(e.clientX, e.clientY));
-canvas.addEventListener('touchstart', e => {
-  if (e.touches[0]) onPress(e.touches[0].clientX, e.touches[0].clientY);
-}, { passive: true });
-canvas.addEventListener('touchend', e => {
-  if (e.changedTouches[0]) onRelease(e.changedTouches[0].clientX, e.changedTouches[0].clientY);
 });

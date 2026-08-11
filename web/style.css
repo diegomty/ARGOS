@@ -146,6 +146,41 @@ header .header-meta { display: flex; align-items: center; gap: 10px; }
 }
 .badge-tipo.evento { background: rgba(245, 193, 75, 0.15); color: var(--amber); }
 .badge-tipo.flujo  { background: rgba(255, 77, 109, 0.15); color: var(--red); }
+
+/* --- Vista Config --- */
+.view-config { grid-template-rows: 1fr; }
+.config-shell { display: grid; grid-template-rows: auto 1fr; min-height: 0; }
+.config-body {
+  overflow: auto; padding: 18px;
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 14px; align-content: start;
+}
+.config-card {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 8px; padding: 14px 16px;
+}
+.config-card-title {
+  font-size: 10px; letter-spacing: 2px; text-transform: uppercase;
+  color: var(--muted); margin-bottom: 12px;
+}
+.config-row {
+  display: flex; justify-content: space-between; gap: 12px;
+  padding: 5px 0; border-bottom: 1px solid rgba(31, 42, 68, 0.4); font-size: 12px;
+}
+.config-row:last-child { border-bottom: none; }
+.config-k { color: var(--muted); }
+.config-v { color: var(--text); text-align: right; font-variant-numeric: tabular-nums; }
+.config-actions { display: flex; flex-direction: column; gap: 10px; align-items: stretch; }
+.config-msg { font-size: 11px; margin-top: 4px; min-height: 14px; letter-spacing: 0.5px; }
+.config-msg.ok { color: var(--cyan); }
+.config-msg.err { color: var(--red); }
+.config-field label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+.config-inline { display: flex; gap: 8px; align-items: center; }
+.config-inline input {
+  background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  border-radius: 4px; padding: 6px 10px; width: 90px; font-family: inherit; font-size: 12px;
+}
+.config-hint { font-size: 10px; color: var(--muted); margin-top: 6px; }
 .table-empty {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
   color: var(--muted); font-size: 12px; letter-spacing: 1px; pointer-events: none;
@@ -241,8 +276,11 @@ button:hover { background: var(--cyan); color: var(--bg); }
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
+  /* Contiene el Mapa de Red (antes el gemelo 3D): el map-shell llena la altura. */
+  display: grid;
+  grid-template-rows: 1fr;
+  min-height: 0;
 }
-.stage canvas { display: block; width: 100% !important; height: 100% !important; }
 .view-label {
   position: absolute; top: 14px; left: 16px;
   font-size: 11px; color: var(--muted);
