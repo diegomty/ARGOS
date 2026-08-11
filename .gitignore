@@ -66,3 +66,9 @@ datasets/*.npz
 
 # --- Modelos ML entrenados (reproducibles con python -m ml.train) ---
 ml/models/
+
+# --- Graphify (grafo de conocimiento del código, herramienta de dev) ---
+graphify-out/
+
+# --- Config MCP local (rutas absolutas de la maquina, no portable) ---
+.mcp.json
