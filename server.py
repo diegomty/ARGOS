@@ -23,8 +23,10 @@ from fastapi.staticfiles import StaticFiles
 
 from Sentinel import iniciar_q_sentinel
 from core import topology as topology_mod
+from core.analysis import hash_sha3
 from core.events import SentinelEvent
 from core.flowlistener import FlowListener
+from core.honeypot import HoneypotListener
 from core.storage import Storage
 from core.topology import Topology
 from ml.detector import HybridDetector
@@ -151,6 +153,7 @@ except Exception as e:
 
 
 _flow_listener: Optional[FlowListener] = None
+_honeypot: Optional[HoneypotListener] = None
 
 
 def _arrancar_flow_listener(loop: asyncio.AbstractEventLoop) -> Optional[FlowListener]:
@@ -234,6 +237,48 @@ def _arrancar_listener(loop: asyncio.AbstractEventLoop) -> threading.Thread:
     return thread
 
 
+def _arrancar_honeypot(loop: asyncio.AbstractEventLoop) -> HoneypotListener:
+    """Lanza el honeypot. Cada conexión a un señuelo es una amenaza REAL de
+    alta confianza (nadie legítimo toca un servicio falso), así que la
+    convertimos en un SentinelEvent anómalo y la inyectamos al mismo pipeline
+    que los eventos de syslog: persiste, cuenta y se emite por WebSocket.
+    """
+
+    def on_hit(hit: dict) -> None:
+        msg = (f"HONEYPOT {hit['service']}:{hit['dst_port']} <- "
+               f"{hit['src_ip']}:{hit['src_port']} "
+               f"data={hit['data'][:120] or '(sin datos)'}")
+        ev = SentinelEvent(
+            timestamp=hit["timestamp"],
+            raw_message=msg,
+            source_ip=hit["src_ip"],
+            entropy=6.5,               # alta: un hit de honeypot es severidad máxima
+            sha3=hash_sha3(msg),
+            is_trusted=False,
+            is_anomaly=True,
+            attacker_ip=hit["src_ip"],
+            plan="A",
+            blocked=False,
+            response_log=[f"[honeypot] señuelo '{hit['service']}' tocado "
+                          f"en puerto {hit['dst_port']}"],
+        )
+        payload = ev.to_dict()
+        try:
+            storage.save_event(payload)
+        except Exception as e:
+            print(f"[storage] save_event (honeypot) ERROR: {e}", flush=True)
+        manager.record_event(payload)
+        asyncio.run_coroutine_threadsafe(
+            manager.broadcast({"kind": "event", "payload": payload}),
+            loop,
+        )
+
+    hp = HoneypotListener()
+    hp.start(on_hit)
+    print("[server] honeypot arrancado (señuelos activos)", flush=True)
+    return hp
+
+
 async def _ml_retrain_loop() -> None:
     """Re-entrena la línea base local cada ML_RETRAIN_INTERVAL_S.
 
@@ -251,15 +296,18 @@ async def _ml_retrain_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _flow_listener
+    global _flow_listener, _honeypot
     loop = asyncio.get_running_loop()
     _arrancar_listener(loop)
     _flow_listener = _arrancar_flow_listener(loop)
+    _honeypot = _arrancar_honeypot(loop)
     retrain_task = asyncio.create_task(_ml_retrain_loop())
     yield
     retrain_task.cancel()
     if _flow_listener is not None:
         _flow_listener.stop()
+    if _honeypot is not None:
+        _honeypot.stop()
 
 
 app = FastAPI(title="Q-Sentinel", version="1.4.0", lifespan=lifespan)
