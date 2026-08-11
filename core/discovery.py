@@ -117,6 +117,11 @@ def build_graph(flows: List[Dict[str, Any]]) -> Dict[str, Any]:
     # como cliente: destinos y (destino,puerto) distintos que tocó
     n_client_dsts: Dict[str, set] = defaultdict(set)
     n_client_targets: Dict[str, set] = defaultdict(set)  # (dst_ip, dst_port)
+    # Puertos que cada par (origen -> destino) tocó. Sirve para distinguir un
+    # ESCANEO real (un origen concentrando muchos puertos de un objetivo) del
+    # tráfico de retorno normal (muchos servidores, cada uno a un puerto
+    # efímero distinto de un cliente).
+    port_pairs: Dict[tuple, set] = defaultdict(set)
 
     # Acumulador por arista (src, dst, dst_port, proto).
     edges: Dict[tuple, Dict[str, Any]] = {}
@@ -126,6 +131,7 @@ def build_graph(flows: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not s or not d:
             continue
         dp = int(f.get("dst_port", 0) or 0)
+        sp = int(f.get("src_port", 0) or 0)
         proto = f.get("protocol", "?")
         b = int(f.get("bytes", 0) or 0)
         pk = int(f.get("packets", 0) or 0)
@@ -138,6 +144,12 @@ def build_graph(flows: List[Dict[str, Any]]) -> Dict[str, Any]:
             n_client_targets[s].add((d, dp))
             n_served[d][dp].add(s)
             n_served_bytes[d][dp] += b
+        # Solo cuenta para el escaneo si el ORIGEN no es un puerto de servicio
+        # conocido: un servidor respondiendo usa su puerto conocido (53, 443…)
+        # hacia puertos efímeros del cliente — eso es tráfico de retorno, no
+        # un escaneo. Un escáner de verdad usa un puerto de origen efímero.
+        if dp != 0 and sp not in PORT_SERVICES:
+            port_pairs[(s, d)].add(dp)
 
         for node in (s, d):
             if ts:
@@ -153,6 +165,18 @@ def build_graph(flows: List[Dict[str, Any]]) -> Dict[str, Any]:
         else:
             e["bytes"] += b; e["packets"] += pk; e["flows"] += 1
 
+    # Máximo de puertos que un solo par concentró, por origen y por destino.
+    # Un escáner concentra muchos puertos hacia UN objetivo; el tráfico de
+    # retorno normal reparte 1 puerto efímero por cada servidor.
+    max_ports_from: Dict[str, int] = defaultdict(int)
+    max_ports_to: Dict[str, int] = defaultdict(int)
+    for (s, d), ports in port_pairs.items():
+        k = len(ports)
+        if k > max_ports_from[s]:
+            max_ports_from[s] = k
+        if k > max_ports_to[d]:
+            max_ports_to[d] = k
+
     # --- Construir nodos ---
     all_ips = set(n_bytes_in) | set(n_bytes_out)
     nodes: List[Dict[str, Any]] = []
@@ -160,28 +184,29 @@ def build_graph(flows: List[Dict[str, Any]]) -> Dict[str, Any]:
         served = n_served.get(ip, {})
         served_ports = set(served.keys())
         fanout = len(n_client_dsts.get(ip, ()))
-        targets = len(n_client_targets.get(ip, ()))
         out_flows = n_flows_out.get(ip, 0)
-        avg_out = (n_bytes_out.get(ip, 0) / out_flows) if out_flows else 0
-        is_scanner = targets >= SCANNER_MIN_TARGETS and avg_out <= SCANNER_MAX_AVG_BYTES
+        # Escáner / objetivo de escaneo por CONCENTRACIÓN de puertos por par —
+        # no por conteo total, que el tráfico de retorno inflaba con efímeros.
+        is_scanner = max_ports_from.get(ip, 0) >= SCANNER_MIN_TARGETS
+        is_scan_target = max_ports_to.get(ip, 0) >= SCANNER_MIN_TARGETS
 
-        # Distinguir servicios reales de puertos meramente sondeados.
+        # Servicios reales: puerto conocido, o consumido por VARIOS clientes
+        # distintos (fan-in >= 3). El tráfico de retorno a puertos efímeros tiene
+        # fan-in ~1, así que ya no aparece como "servicio" fantasma.
         served_bytes = n_served_bytes.get(ip, {})
         services = []
         real_ports: set[int] = set()
         probed = 0
         for p, clients in served.items():
             if p == 0:
-                continue  # puerto 0 = flujos ICMP/sin puerto, no es un servicio
+                continue  # puerto 0 = ICMP/sin puerto, no es un servicio
             c = len(clients)
-            bts = served_bytes.get(p, 0)
-            is_real = (p in PORT_SERVICES) or (c >= 2) or (bts >= SERVICE_MIN_BYTES)
-            if not is_real:
+            if (p in PORT_SERVICES) or (c >= 3):
+                services.append({"port": p, "name": _service_name(p),
+                                 "clients": c, "bytes": served_bytes.get(p, 0)})
+                real_ports.add(p)
+            else:
                 probed += 1
-                continue
-            services.append({"port": p, "name": _service_name(p),
-                             "clients": c, "bytes": bts})
-            real_ports.add(p)
         services.sort(key=lambda s: (-s["clients"], -s["bytes"]))
 
         role = _infer_role(real_ports, is_scanner, fanout, bool(real_ports))
@@ -201,7 +226,7 @@ def build_graph(flows: List[Dict[str, Any]]) -> Dict[str, Any]:
             "first_seen": n_first.get(ip),
             "last_seen": n_last.get(ip),
             "is_scanner": is_scanner,
-            "is_scan_target": probed >= SCANNER_MIN_TARGETS,
+            "is_scan_target": is_scan_target,
             "confidence": round(min(1.0, total_flows / 20.0), 2),
             "source": "passive",
         })
