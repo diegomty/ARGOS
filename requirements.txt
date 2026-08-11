@@ -5,3 +5,5 @@ pyyaml>=6.0
 netflow>=0.12
 pandas>=2.2
 scikit-learn>=1.5
+# Sensor de captura pasiva (opt-in: Q_SENTINEL_SENSOR=1). Requiere admin + Npcap/libpcap.
+scapy>=2.5

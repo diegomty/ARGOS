@@ -11,6 +11,7 @@ Ejecutar:
 """
 
 import asyncio
+import os
 import threading
 from collections import deque
 from contextlib import asynccontextmanager
@@ -154,54 +155,74 @@ except Exception as e:
 
 _flow_listener: Optional[FlowListener] = None
 _honeypot: Optional[HoneypotListener] = None
+_sensor = None
+# El sensor de captura pasiva es OPT-IN porque requiere admin: se activa
+# arrancando el servidor con la variable de entorno Q_SENTINEL_SENSOR=1.
+SENSOR_ENABLED = os.getenv("Q_SENTINEL_SENSOR", "0") == "1"
+
+
+def _handle_flow(flow: dict, loop: asyncio.AbstractEventLoop) -> None:
+    """Procesa un flujo venga de donde venga (NetFlow O el sensor pasivo):
+    lo enriquece con topología, lo persiste en SQLite, lo evalúa con el
+    detector ML híbrido y lo difunde por WebSocket. Punto único para que
+    ambas fuentes de flujos entren al pipeline por la misma puerta.
+    """
+    # Enriquecer con topología — si la IP cae en un segmento declarado.
+    if _topology is not None:
+        src_dept = _topology.department_for_ip(flow["src_ip"])
+        dst_dept = _topology.department_for_ip(flow["dst_ip"])
+        flow["src_node"] = src_dept.id if src_dept else None
+        flow["dst_node"] = dst_dept.id if dst_dept else None
+    else:
+        flow["src_node"] = None
+        flow["dst_node"] = None
+
+    try:
+        storage.save_flow(flow)
+    except Exception as e:
+        print(f"[storage] save_flow ERROR: {e}", flush=True)
+
+    # Veredicto ML híbrido (sklearn por fila es ~1 ms).
+    try:
+        flow["ml"] = detector.evaluate(flow)
+    except Exception as e:
+        print(f"[ml] evaluate ERROR: {e}", flush=True)
+        flow["ml"] = None
+
+    # Difusión por WS solo para flujos que mapean a la topología declarada.
+    if flow["src_node"] and flow["dst_node"] and flow["src_node"] != flow["dst_node"]:
+        asyncio.run_coroutine_threadsafe(
+            manager.broadcast({"kind": "flow", "payload": flow}),
+            loop,
+        )
 
 
 def _arrancar_flow_listener(loop: asyncio.AbstractEventLoop) -> Optional[FlowListener]:
-    """Lanza el listener NetFlow UDP/2055 en un thread daemon.
-
-    Para cada flujo: enriquece con info de topología, persiste en SQLite,
-    y lo broadcastea por WS como `kind: "flow"` para alimentar la
-    animación del digital twin.
-    """
-
-    def on_flow(flow: dict) -> None:
-        # Enriquecer con info de la topología — si la IP cae en algún
-        # segmento conocido, anexamos el node_id del depto correspondiente.
-        if _topology is not None:
-            src_dept = _topology.department_for_ip(flow["src_ip"])
-            dst_dept = _topology.department_for_ip(flow["dst_ip"])
-            flow["src_node"] = src_dept.id if src_dept else None
-            flow["dst_node"] = dst_dept.id if dst_dept else None
-        else:
-            flow["src_node"] = None
-            flow["dst_node"] = None
-
-        try:
-            storage.save_flow(flow)
-        except Exception as e:
-            print(f"[storage] save_flow ERROR: {e}", flush=True)
-
-        # Veredicto ML híbrido. Corre en este thread (sklearn por fila es
-        # ~1 ms, despreciable al rate del lab) y viaja con el flujo al WS
-        # para que el frontend pueda explicar quién marcó qué.
-        try:
-            flow["ml"] = detector.evaluate(flow)
-        except Exception as e:
-            print(f"[ml] evaluate ERROR: {e}", flush=True)
-            flow["ml"] = None
-
-        # Solo difundimos flujos cuyos endpoints mapean a la topología —
-        # los del propio R1 hacia sí mismo no aportan a la viz.
-        if flow["src_node"] and flow["dst_node"] and flow["src_node"] != flow["dst_node"]:
-            asyncio.run_coroutine_threadsafe(
-                manager.broadcast({"kind": "flow", "payload": flow}),
-                loop,
-            )
-
+    """Lanza el listener NetFlow UDP/2055 en un thread daemon."""
     listener = FlowListener(host="0.0.0.0", port=2055)
-    listener.start(on_flow)
+    listener.start(lambda flow: _handle_flow(flow, loop))
     print("[server] listener NetFlow arrancado en thread daemon", flush=True)
     return listener
+
+
+def _arrancar_sensor(loop: asyncio.AbstractEventLoop):
+    """Sensor de captura pasiva (OPT-IN). Alimenta el pipeline con los flujos
+    REALES de la red del host — así el Mapa y el detector dejan de depender de
+    que un router exporte NetFlow.
+
+    Requiere que el servidor corra COMO ADMINISTRADOR (captura de paquetes) y
+    Npcap/libpcap. Se activa con la variable de entorno Q_SENTINEL_SENSOR=1.
+    Si algo falla, degrada con gracia sin tumbar el servidor.
+    """
+    try:
+        from core.sensor import PassiveSensor  # import perezoso (scapy)
+        sensor = PassiveSensor()
+        sensor.start(lambda flow: _handle_flow(flow, loop))
+        print("[server] sensor de captura pasiva arrancado", flush=True)
+        return sensor
+    except Exception as e:
+        print(f"[sensor] no se pudo iniciar (¿admin? ¿Npcap? ¿scapy?): {e}", flush=True)
+        return None
 
 
 def _arrancar_listener(loop: asyncio.AbstractEventLoop) -> threading.Thread:
@@ -296,11 +317,13 @@ async def _ml_retrain_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _flow_listener, _honeypot
+    global _flow_listener, _honeypot, _sensor
     loop = asyncio.get_running_loop()
     _arrancar_listener(loop)
     _flow_listener = _arrancar_flow_listener(loop)
     _honeypot = _arrancar_honeypot(loop)
+    if SENSOR_ENABLED:
+        _sensor = _arrancar_sensor(loop)
     retrain_task = asyncio.create_task(_ml_retrain_loop())
     yield
     retrain_task.cancel()
@@ -308,6 +331,8 @@ async def lifespan(app: FastAPI):
         _flow_listener.stop()
     if _honeypot is not None:
         _honeypot.stop()
+    if _sensor is not None:
+        _sensor.stop()
 
 
 app = FastAPI(title="Q-Sentinel", version="1.4.0", lifespan=lifespan)

@@ -1,0 +1,166 @@
+"""Sensor de captura pasiva: sniffer que produce flujos reales de la red.
+
+Captura paquetes de una interfaz con Scapy, los agrega por 5-tupla y emite
+cada flujo terminado por un callback `on_flow` — con la MISMA forma que produce
+core/flowlistener.py (NetFlow), para que enchufe al pipeline sin cambios.
+
+Así Q-Sentinel deja de depender de que un router exporte NetFlow: puede
+descubrir y monitorear cualquier red observando su tráfico directamente.
+
+Mismo patrón que FlowListener/HoneypotListener: hilos daemon + callback. Usa
+`AsyncSniffer` de Scapy (captura en su propio hilo, con stop() limpio).
+
+Requiere privilegios de administrador y Npcap (Windows) o libpcap.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+from typing import Any, Callable, Dict, Optional
+
+from scapy.all import AsyncSniffer, IP, TCP, UDP
+
+PROTOCOLOS: Dict[int, str] = {1: "icmp", 6: "tcp", 17: "udp", 2: "igmp", 47: "gre"}
+
+FlowCallback = Callable[[Dict[str, Any]], None]
+
+
+def _extraer(paquete) -> Optional[tuple]:
+    """Paquete Scapy -> (clave 5-tupla, protocol, bytes). None si no es IPv4."""
+    if IP not in paquete:
+        return None
+    ip = paquete[IP]
+    proto_num = ip.proto
+    sport = dport = 0
+    if TCP in paquete:
+        sport, dport = paquete[TCP].sport, paquete[TCP].dport
+    elif UDP in paquete:
+        sport, dport = paquete[UDP].sport, paquete[UDP].dport
+    clave = (ip.src, ip.dst, sport, dport, proto_num)
+    return clave, PROTOCOLOS.get(proto_num, f"proto-{proto_num}"), len(paquete)
+
+
+def _to_flow(clave: tuple, fl: dict) -> Dict[str, Any]:
+    """Flujo interno -> dict con la forma del pipeline (igual que FlowListener)."""
+    src, dst, sp, dp, proto_num = clave
+    return {
+        "src_ip": src, "dst_ip": dst,
+        "src_port": sp, "dst_port": dp,
+        "protocol_num": proto_num, "protocol": fl["protocol"],
+        "packets": fl["packets"], "bytes": fl["bytes"],
+        "duration_ms": int((fl["last"] - fl["first"]) * 1000),
+        "exporter": "sensor-local",
+    }
+
+
+class PassiveSensor:
+    """Captura pasiva de tráfico y emisión de flujos por callback."""
+
+    def __init__(
+        self,
+        iface: Optional[str] = None,
+        flush_interval: float = 5.0,
+        inactive_timeout: float = 15.0,
+    ) -> None:
+        self.iface = iface
+        self.flush_interval = flush_interval
+        self.inactive_timeout = inactive_timeout
+        self._flows: Dict[tuple, dict] = {}
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._sniffer: Optional[AsyncSniffer] = None
+        self._flush_thread: Optional[threading.Thread] = None
+        self._packets = 0
+        self._emitted = 0
+
+    # ---- API pública (misma forma que FlowListener) ----
+
+    def start(self, on_flow: FlowCallback) -> None:
+        if self._sniffer is not None:
+            return
+        # AsyncSniffer captura en su propio hilo; filtramos a IP en la captura.
+        self._sniffer = AsyncSniffer(prn=self._on_packet, store=False,
+                                     filter="ip", iface=self.iface)
+        self._sniffer.start()
+        self._flush_thread = threading.Thread(
+            target=self._flush_loop, args=(on_flow,),
+            daemon=True, name="sensor-flush",
+        )
+        self._flush_thread.start()
+        print(f"[sensor] captura pasiva activa (iface={self.iface or 'default'})",
+              flush=True)
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._sniffer is not None:
+            try:
+                self._sniffer.stop()
+            except Exception:
+                pass
+        if self._flush_thread is not None:
+            self._flush_thread.join(timeout=3)
+
+    def stats(self) -> Dict[str, Any]:
+        with self._lock:
+            activos = len(self._flows)
+        return {"packets": self._packets, "emitted": self._emitted, "active": activos}
+
+    # ---- Internos ----
+
+    def _on_packet(self, paquete) -> None:
+        """Callback de captura: acumula el paquete en su flujo (bajo lock)."""
+        datos = _extraer(paquete)
+        if datos is None:
+            return
+        clave, proto, nbytes = datos
+        t = float(paquete.time)
+        with self._lock:
+            self._packets += 1
+            fl = self._flows.get(clave)
+            if fl is None:
+                self._flows[clave] = {"protocol": proto, "packets": 1,
+                                      "bytes": nbytes, "first": t, "last": t}
+            else:
+                fl["packets"] += 1
+                fl["bytes"] += nbytes
+                fl["last"] = t
+
+    def _flush_loop(self, on_flow: FlowCallback) -> None:
+        """Cada `flush_interval` emite los flujos terminados."""
+        while not self._stop.is_set():
+            self._stop.wait(self.flush_interval)
+            self._flush(on_flow)
+        self._flush(on_flow, forzar=True)  # emite lo que quede al parar
+
+    def _flush(self, on_flow: FlowCallback, forzar: bool = False) -> None:
+        ahora = time.time()
+        with self._lock:
+            terminados = [k for k, f in self._flows.items()
+                          if forzar or (ahora - f["last"]) > self.inactive_timeout]
+            listos = [(k, self._flows.pop(k)) for k in terminados]
+        for clave, fl in listos:
+            self._emitted += 1
+            try:
+                on_flow(_to_flow(clave, fl))
+            except Exception as e:
+                print(f"[sensor] callback error: {e}", flush=True)
+
+
+# Demo standalone: `python -m core.sensor`  (como administrador)
+if __name__ == "__main__":
+    def imprimir(flujo: Dict[str, Any]) -> None:
+        print(f"[flujo] {flujo['protocol']:5} "
+              f"{flujo['src_ip']}:{flujo['src_port']} -> "
+              f"{flujo['dst_ip']}:{flujo['dst_port']}  "
+              f"{flujo['packets']} paq · {flujo['bytes']} B · {flujo['duration_ms']} ms")
+
+    sensor = PassiveSensor(inactive_timeout=8.0)
+    sensor.start(imprimir)
+    print("[sensor] activo. Ctrl+C para salir.")
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        sensor.stop()
+        print(f"\n[sensor] detenido. stats={sensor.stats()}")
