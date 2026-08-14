@@ -13,7 +13,13 @@ Ejecutar:
 import asyncio
 import os
 import threading
+import warnings
 from collections import deque
+
+# scikit-learn emite un UserWarning por cada predicción cuando el estimador usa
+# joblib con n_jobs distinto de 1 (aviso interno de la librería, sin impacto).
+# Como el detector evalúa CADA flujo, ensuciaba la consola: lo silenciamos.
+warnings.filterwarnings("ignore", message=r".*delayed.*Parallel.*")
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Deque, List, Optional
@@ -27,7 +33,7 @@ from core import topology as topology_mod
 from core.analysis import hash_sha3
 from core.events import SentinelEvent
 from core.flowlistener import FlowListener
-from core.honeypot import HoneypotListener
+from core.honeypot import HoneypotListener, DEFAULT_DECOYS
 from core.storage import Storage
 from core.topology import Topology
 from ml.detector import HybridDetector
@@ -214,10 +220,17 @@ def _arrancar_sensor(loop: asyncio.AbstractEventLoop):
     Npcap/libpcap. Se activa con la variable de entorno Q_SENTINEL_SENSOR=1.
     Si algo falla, degrada con gracia sin tumbar el servidor.
     """
+    def _on_identity(ip, mac, hostname, source):
+        # Nombre/MAC observados pasivamente (DHCP/mDNS) -> tabla de identidades.
+        try:
+            storage.upsert_identity(ip, mac=mac, hostname=hostname, source=source)
+        except Exception:
+            pass
+
     try:
         from core.sensor import PassiveSensor  # import perezoso (scapy)
         sensor = PassiveSensor()
-        sensor.start(lambda flow: _handle_flow(flow, loop))
+        sensor.start(lambda flow: _handle_flow(flow, loop), on_identity=_on_identity)
         print("[server] sensor de captura pasiva arrancado", flush=True)
         return sensor
     except Exception as e:
@@ -447,8 +460,61 @@ async def ml_retrain() -> JSONResponse:
     return JSONResponse({"ready": ready, "local": detector.local.stats()})
 
 
+@app.get("/api/honeypot")
+async def honeypot_status() -> JSONResponse:
+    """Estado del honeypot: si está activo, sus señuelos y cuántos hits lleva."""
+    hp = _honeypot
+    running = hp is not None and hp.is_running()
+    base = hp.stats() if hp is not None else {
+        "hits": 0, "errors": 0, "puertos": list(DEFAULT_DECOYS)}
+    # Nombre de servicio por puerto, para mostrarlo en la UI.
+    servicios = {p: DEFAULT_DECOYS[p][0] for p in DEFAULT_DECOYS}
+    return JSONResponse({"running": running, "servicios": servicios, **base})
+
+
+@app.post("/api/honeypot/toggle")
+async def honeypot_toggle() -> JSONResponse:
+    """Activa o desactiva el honeypot (levanta o cierra los señuelos)."""
+    global _honeypot
+    if _honeypot is not None and _honeypot.is_running():
+        _honeypot.stop()
+        _honeypot = None
+        return JSONResponse({"running": False})
+    _honeypot = _arrancar_honeypot(asyncio.get_running_loop())
+    return JSONResponse({"running": True, **_honeypot.stats()})
+
+
+@app.post("/api/honeypot/test")
+async def honeypot_test() -> JSONResponse:
+    """Genera un hit REAL conectándose a un señuelo propio — para demostrar la
+    reacción del sistema de punta a punta (evento anómalo + KPIs + Anomalías)."""
+    if _honeypot is None or not _honeypot.is_running():
+        return JSONResponse({"error": "el honeypot está apagado; actívalo primero"},
+                            status_code=400)
+    port = next(iter(DEFAULT_DECOYS))
+
+    def _tocar() -> None:
+        import socket as _sock
+        c = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+        c.settimeout(2.0)
+        try:
+            c.connect(("127.0.0.1", port))
+            try:
+                c.recv(64)            # recibe el banner falso
+            except Exception:
+                pass
+            c.sendall(b"intento-de-intrusion-de-prueba\r\n")
+        finally:
+            c.close()
+
+    await asyncio.to_thread(_tocar)
+    return JSONResponse({"ok": True, "port": port,
+                         "service": DEFAULT_DECOYS[port][0]})
+
+
 @app.get("/api/discovery")
-async def discovery(window: Optional[float] = None, min_flows: int = 2) -> JSONResponse:
+async def discovery(window: Optional[float] = None, min_flows: int = 2,
+                    group_external: bool = True) -> JSONResponse:
     """Topología DESCUBIERTA automáticamente a partir de los flujos observados.
 
     A diferencia de `/api/topology` (modelo declarado a mano en topology.yaml),
@@ -459,13 +525,18 @@ async def discovery(window: Optional[float] = None, min_flows: int = 2) -> JSONR
     * `window`     — segundos hacia atrás a considerar (None = todo el histórico).
     * `min_flows`  — descarta nodos con menos flujos (doma el ruido efímero).
     """
-    from core.discovery import discover_from_storage, annotate, filter_graph
+    from core.discovery import (discover_from_storage, annotate, filter_graph,
+                                 collapse_external)
+    from core.identify import enrich_graph
 
     def _build() -> dict:
         graph = discover_from_storage(storage, window_s=window)
-        graph = filter_graph(graph, max(1, int(min_flows)))
         if _topology is not None:
             annotate(graph, _topology)
+        if group_external:
+            graph = collapse_external(graph)  # externos -> nodo «Internet»
+        graph = filter_graph(graph, max(1, int(min_flows)))
+        enrich_graph(graph, storage)  # nombre + fabricante por IP (Fase O)
         return graph
 
     try:

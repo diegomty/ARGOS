@@ -19,12 +19,19 @@ tip.className = 'map-tip';
 tip.style.display = 'none';
 canvas.parentElement.appendChild(tip);
 
+// Panel de detalle (drill-down): al enfocar un nodo aparece a la derecha con
+// sus puertos y relaciones. El mapa se mantiene limpio y el detalle vive aquí.
+const panel = document.createElement('div');
+panel.className = 'map-panel';
+panel.style.display = 'none';
+canvas.parentElement.appendChild(panel);
+
 // --- Paleta por rol (respaldo cuando el nodo no trae color_hint) ---
 const ROLE_COLOR = {
   database: '#f5c14b', dns: '#a78bfa', 'windows-server': '#5ee0d6',
   'mail-server': '#60a5fa', 'web-server': '#7cf09a', 'file-server': '#f59e0b',
   'ssh-host': '#94a3b8', scanner: '#ff4d6d', workstation: '#b8c4d6',
-  host: '#6c7a99',
+  host: '#6c7a99', internet: '#64748b',
 };
 const CRIT_COLOR = { critical: '#ff4d6d', high: '#f5c14b', medium: '#60a5fa' };
 
@@ -218,9 +225,9 @@ function draw() {
       ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.5;
       ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 10, 0, Math.PI * 2); ctx.stroke();
     }
-    // Etiqueta.
+    // Etiqueta: nombre del dispositivo si lo conocemos, si no la IP.
     ctx.fillStyle = n === hoverNode ? '#d6dee8' : 'rgba(214,222,232,0.6)';
-    ctx.fillText(n.label || n.ip, n.x, n.y + n.r + 13);
+    ctx.fillText(n.device_name || n.label || n.ip, n.x, n.y + n.r + 13);
   }
   ctx.globalAlpha = 1;
 }
@@ -250,6 +257,81 @@ function fitToNodes(list, pad = 70, maxScale = 1.8) {
 }
 function fitView() { fitToNodes(nodes, 70, 1.8); }
 
+// --- Panel de detalle (drill-down) --------------------------------------
+function fmtBytes(b) {
+  b = +b || 0;
+  if (b >= 1e9) return (b / 1e9).toFixed(1) + ' GB';
+  if (b >= 1e6) return (b / 1e6).toFixed(1) + ' MB';
+  if (b >= 1e3) return (b / 1e3).toFixed(1) + ' KB';
+  return b + ' B';
+}
+
+// Vecinos separados por dirección (a quién habla / quién le habla), con flujos.
+function neighborsOf(node) {
+  const out = [], inc = [];
+  for (const e of edges) {
+    if (e.source === node.id) out.push({ id: e.target, flows: e.flows || 0 });
+    else if (e.target === node.id) inc.push({ id: e.source, flows: e.flows || 0 });
+  }
+  out.sort((a, b) => b.flows - a.flows);
+  inc.sort((a, b) => b.flows - a.flows);
+  return { out, inc };
+}
+
+// Rellena y muestra el panel con el detalle del nodo enfocado.
+function showPanel(n) {
+  const name = (id) => { const m = byId.get(id); return m ? (m.label || m.ip) : id; };
+  // Tabla de servicios/puertos expuestos (o aviso si no expone ninguno).
+  const svc = n.services || [];
+  const svcRows = svc.length
+    ? svc.map(s => `<tr><td class="mp-port">${s.port}</td><td>${s.name}</td>`
+        + `<td>${s.clients}</td><td>${fmtBytes(s.bytes)}</td></tr>`).join('')
+    : `<tr><td colspan="4" class="mp-empty">sin servicios expuestos</td></tr>`;
+  // Relaciones por dirección: clic en un vecino salta el enfoque hacia él.
+  const { out, inc } = neighborsOf(n);
+  const peers = (list, arrow, cls) => list.length
+    ? list.map(p => `<li data-id="${p.id}"><span class="mp-arrow ${cls}">${arrow}</span>`
+        + `<span class="mp-peer">${name(p.id)}</span>`
+        + `<span class="mp-flows">${p.flows}</span></li>`).join('')
+    : `<li class="mp-empty">—</li>`;
+  // Insignias: amenazas y criticidad.
+  const badges = [];
+  if (n.is_scan_target) badges.push(`<span class="mp-badge warn">◈ objetivo de escaneo (${n.probed_ports || 0} puertos)</span>`);
+  if (n.is_scanner) badges.push(`<span class="mp-badge warn">◈ comportamiento de escáner</span>`);
+  if (n.criticality) badges.push(`<span class="mp-badge crit">${n.criticality}</span>`);
+
+  panel.innerHTML =
+      `<div class="mp-head">`
+    +   `<div><div class="mp-title">${n.device_name || n.label || n.ip}</div>`
+    +     `<div class="mp-ip">${n.ip}</div></div>`
+    +   `<button class="mp-close" title="Cerrar">✕</button>`
+    + `</div>`
+    + `<div class="mp-meta">`
+    +   `<span><i>rol</i> ${n.role}</span>`
+    +   (n.vendor ? `<span><i>fabricante</i> ${n.vendor}</span>` : '')
+    +   (n.hostname ? `<span><i>hostname</i> ${n.hostname}</span>` : '')
+    +   (n.mac ? `<span><i>mac</i> ${n.mac}</span>` : '')
+    +   (n.department ? `<span><i>zona</i> ${n.department}</span>` : '')
+    +   `<span><i>flujos</i> ${n.flows || 0}</span>`
+    + `</div>`
+    + (badges.length ? `<div class="mp-badges">${badges.join('')}</div>` : '')
+    + `<div class="mp-sec">Puertos / servicios</div>`
+    + `<table class="mp-table"><thead><tr><th>puerto</th><th>servicio</th>`
+    +   `<th>clientes</th><th>volumen</th></tr></thead><tbody>${svcRows}</tbody></table>`
+    + `<div class="mp-sec">Habla con <span class="mp-count">${out.length}</span></div>`
+    + `<ul class="mp-peers">${peers(out, '→', 'out')}</ul>`
+    + `<div class="mp-sec">Le hablan <span class="mp-count">${inc.length}</span></div>`
+    + `<ul class="mp-peers">${peers(inc, '←', 'in')}</ul>`;
+  panel.style.display = 'block';
+}
+
+// Clic dentro del panel: cerrar (✕) o saltar el enfoque al vecino elegido.
+panel.addEventListener('click', (e) => {
+  if (e.target.closest('.mp-close')) { clearFocus(); return; }
+  const li = e.target.closest('li[data-id]');
+  if (li) { const m = byId.get(li.dataset.id); if (m) focusOn(m); }
+});
+
 // Enfoca un nodo: resalta él + sus vecinos y hace zoom para verlos.
 function focusOn(node) {
   focusNode = node;
@@ -260,10 +342,12 @@ function focusOn(node) {
   }
   fitToNodes([...focusSet].map(id => byId.get(id)), 110, 2.4);
   userInteracted = true;
+  showPanel(node);   // abre el drill-down con puertos y relaciones del nodo
 }
 function clearFocus() {
   const had = !!focusNode;
   focusNode = null; focusSet = new Set();
+  panel.style.display = 'none';                    // cierra el drill-down
   if (had) { fitView(); userInteracted = true; }  // solo reencuadra si había enfoque
 }
 
@@ -272,6 +356,7 @@ function clearFocus() {
 const SERVER_ROLES = ['database', 'dns', 'web-server', 'mail-server',
                       'file-server', 'windows-server'];
 function tierOf(n) {
+  if (n.role === 'internet') return 0;                              // la nube externa
   if (n.is_scanner || /extern/i.test(n.department || '')) return 0;  // perímetro
   if (SERVER_ROLES.includes(n.role)) return 1;                        // servidores
   return 2;                                                           // hosts/clientes

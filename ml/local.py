@@ -64,7 +64,7 @@ class LocalModel:
             n_estimators=150,
             contamination=CONTAMINATION,
             random_state=42,
-            n_jobs=-1,
+            n_jobs=1,  # predecir un flujo no necesita paralelismo (y evita el warning)
         )
         model.fit(x)
         with self._lock:

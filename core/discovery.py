@@ -106,8 +106,13 @@ def build_graph(flows: List[Dict[str, Any]]) -> Dict[str, Any]:
     # Acumuladores por nodo.
     n_bytes_in: Dict[str, int] = defaultdict(int)
     n_bytes_out: Dict[str, int] = defaultdict(int)
-    n_flows_in: Dict[str, int] = defaultdict(int)
-    n_flows_out: Dict[str, int] = defaultdict(int)
+    # Conexiones DISTINTAS (5-tupla) por nodo. Contamos conexiones, no registros:
+    # el sensor fragmenta una conexión persistente en muchos flujos (la vacía por
+    # inactividad y la recrea al reanudar), así que contar registros infla el
+    # número (una sesión de Steam llegó a 213 "flujos"). Distinguir por 5-tupla
+    # colapsa esos fragmentos en la conexión real que representan.
+    n_conns_in: Dict[str, set] = defaultdict(set)
+    n_conns_out: Dict[str, set] = defaultdict(set)
     n_first: Dict[str, float] = {}
     n_last: Dict[str, float] = {}
     # puerto expuesto -> conjunto de clientes distintos que lo consumieron
@@ -137,8 +142,9 @@ def build_graph(flows: List[Dict[str, Any]]) -> Dict[str, Any]:
         pk = int(f.get("packets", 0) or 0)
         ts = float(f.get("received_at", 0) or 0)
 
-        n_bytes_out[s] += b; n_flows_out[s] += 1
-        n_bytes_in[d] += b; n_flows_in[d] += 1
+        conn = (s, d, sp, dp, proto)  # identidad de la conexión (5-tupla)
+        n_bytes_out[s] += b; n_conns_out[s].add(conn)
+        n_bytes_in[d] += b; n_conns_in[d].add(conn)
         n_client_dsts[s].add(d)
         if dp < EPHEMERAL_MIN:
             n_client_targets[s].add((d, dp))
@@ -158,12 +164,24 @@ def build_graph(flows: List[Dict[str, Any]]) -> Dict[str, Any]:
                 if node not in n_last or ts > n_last[node]:
                     n_last[node] = ts
 
-        ek = (s, d, dp, proto)
+        # Puerto de SERVICIO de la relación, para no crear una arista por cada
+        # puerto efímero. Si el destino es un servicio conocido, la relación
+        # trata de él; si no, pero el origen sí lo es, es una respuesta (trata
+        # del origen); si NINGUNO es conocido (P2P/efímero puro), la relación es
+        # "dinámica" (puerto 0) y todas colapsan en una sola. Así el tráfico de
+        # retorno (973 respuestas DNS) y el P2P efímero no saturan el grafo.
+        if dp in PORT_SERVICES:
+            edge_port = dp
+        elif sp in PORT_SERVICES:
+            edge_port = sp
+        else:
+            edge_port = 0
+        ek = (s, d, edge_port, proto)
         e = edges.get(ek)
         if e is None:
-            edges[ek] = {"bytes": b, "packets": pk, "flows": 1}
+            edges[ek] = {"bytes": b, "packets": pk, "conns": {(sp, dp)}}
         else:
-            e["bytes"] += b; e["packets"] += pk; e["flows"] += 1
+            e["bytes"] += b; e["packets"] += pk; e["conns"].add((sp, dp))
 
     # Máximo de puertos que un solo par concentró, por origen y por destino.
     # Un escáner concentra muchos puertos hacia UN objetivo; el tráfico de
@@ -184,7 +202,7 @@ def build_graph(flows: List[Dict[str, Any]]) -> Dict[str, Any]:
         served = n_served.get(ip, {})
         served_ports = set(served.keys())
         fanout = len(n_client_dsts.get(ip, ()))
-        out_flows = n_flows_out.get(ip, 0)
+        out_flows = len(n_conns_out.get(ip, ()))
         # Escáner / objetivo de escaneo por CONCENTRACIÓN de puertos por par —
         # no por conteo total, que el tráfico de retorno inflaba con efímeros.
         is_scanner = max_ports_from.get(ip, 0) >= SCANNER_MIN_TARGETS
@@ -210,7 +228,7 @@ def build_graph(flows: List[Dict[str, Any]]) -> Dict[str, Any]:
         services.sort(key=lambda s: (-s["clients"], -s["bytes"]))
 
         role = _infer_role(real_ports, is_scanner, fanout, bool(real_ports))
-        total_flows = n_flows_in.get(ip, 0) + out_flows
+        total_flows = len(n_conns_in.get(ip, ())) + out_flows
 
         nodes.append({
             "id": ip,
@@ -234,12 +252,12 @@ def build_graph(flows: List[Dict[str, Any]]) -> Dict[str, Any]:
     # --- Construir aristas (peso normalizado por bytes) ---
     max_bytes = max((e["bytes"] for e in edges.values()), default=1) or 1
     edge_list: List[Dict[str, Any]] = []
-    for (s, d, dp, proto), e in edges.items():
+    for (s, d, ep, proto), e in edges.items():
         edge_list.append({
             "source": s, "target": d,
-            "port": dp, "service": _service_name(dp) if dp < EPHEMERAL_MIN else None,
+            "port": ep, "service": _service_name(ep) if ep and ep < EPHEMERAL_MIN else None,
             "protocol": proto,
-            "bytes": e["bytes"], "packets": e["packets"], "flows": e["flows"],
+            "bytes": e["bytes"], "packets": e["packets"], "flows": len(e["conns"]),
             "weight": round(e["bytes"] / max_bytes, 4),
         })
 
@@ -302,6 +320,87 @@ def annotate(graph: Dict[str, Any], topology: Any) -> Dict[str, Any]:
                 node["color_hint"] = dmeta["color_hint"]
     graph["stats"]["annotated"] = sum(1 for n in graph["nodes"] if n["annotated"])
     return graph
+
+
+INTERNET_ID = "internet"
+
+
+def _is_internal(ip: str) -> bool:
+    """True si la IP pertenece a la red local (privada), no a internet."""
+    try:
+        a = ipaddress.ip_address(ip)
+        return a.is_private and not a.is_multicast
+    except ValueError:
+        return False
+
+
+def collapse_external(graph: Dict[str, Any]) -> Dict[str, Any]:
+    """Colapsa los hosts EXTERNOS (IPs públicas) en un único nodo «Internet».
+
+    Una laptop normal habla con cientos de servidores de internet (CDNs, apps,
+    telemetría); dibujarlos uno a uno satura el mapa y además no son «tu red».
+    Los agregamos en una sola nube para que la topología muestre tus dispositivos.
+    Se CONSERVAN como nodos propios los externos con señal de seguridad (escáner
+    u objetivo de escaneo): esos sí importan y no deben esconderse en la nube.
+    """
+    ext, keep_ext = set(), set()
+    for n in graph["nodes"]:
+        if _is_internal(n["ip"]):
+            continue
+        if n.get("is_scanner") or n.get("is_scan_target"):
+            keep_ext.add(n["id"])   # externo relevante: se queda visible
+        else:
+            ext.add(n["id"])
+    if not ext:
+        return graph  # red sin externos «ordinarios»: nada que colapsar
+
+    agg = {
+        "id": INTERNET_ID, "ip": INTERNET_ID, "label": "Internet",
+        "role": "internet", "zone": "internet", "services": [],
+        "bytes_in": 0, "bytes_out": 0, "flows": 0, "fanout": 0,
+        "probed_ports": 0, "is_scanner": False, "is_scan_target": False,
+        "confidence": 1.0, "source": "passive", "collapsed": 0,
+    }
+    remap: Dict[str, str] = {}
+    new_nodes: List[Dict[str, Any]] = []
+    for n in graph["nodes"]:
+        if n["id"] in ext:
+            agg["bytes_in"] += n.get("bytes_in", 0)
+            agg["bytes_out"] += n.get("bytes_out", 0)
+            agg["flows"] += n.get("flows", 0)
+            agg["collapsed"] += 1
+            remap[n["id"]] = INTERNET_ID
+        else:
+            new_nodes.append(n)
+    new_nodes.append(agg)
+
+    # Reescribe extremos externos al nodo Internet y fusiona aristas paralelas.
+    # Contra la nube agregamos por par (sin puerto): una sola relación por host.
+    merged: Dict[tuple, Dict[str, Any]] = {}
+    for e in graph["edges"]:
+        s = remap.get(e["source"], e["source"])
+        d = remap.get(e["target"], e["target"])
+        if s == d:
+            continue  # externo<->externo colapsado: irrelevante
+        to_cloud = (s == INTERNET_ID or d == INTERNET_ID)
+        key = (s, d) if to_cloud else (s, d, e.get("port"), e.get("protocol"))
+        m = merged.get(key)
+        if m is None:
+            ne = {**e, "source": s, "target": d}
+            if to_cloud:
+                ne["port"] = None; ne["service"] = None; ne["protocol"] = "mix"
+            merged[key] = ne
+        else:
+            m["bytes"] += e["bytes"]; m["packets"] += e["packets"]
+            m["flows"] += e["flows"]
+    new_edges = list(merged.values())
+
+    stats = dict(graph["stats"])
+    stats["node_count"] = len(new_nodes)
+    stats["edge_count"] = len(new_edges)
+    stats["collapsed_external"] = len(ext)
+    stats["kept_external"] = len(keep_ext)
+    return {**graph, "nodes": new_nodes, "edges": new_edges, "stats": stats}
 
 
 def filter_graph(graph: Dict[str, Any], min_flows: int = 1) -> Dict[str, Any]:

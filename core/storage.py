@@ -20,6 +20,7 @@ import json
 import sqlite3
 import threading
 import time
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -77,6 +78,15 @@ CREATE TABLE IF NOT EXISTS flows (
 );
 CREATE INDEX IF NOT EXISTS idx_flows_received ON flows(received_at);
 CREATE INDEX IF NOT EXISTS idx_flows_proto    ON flows(protocol_num, received_at);
+
+CREATE TABLE IF NOT EXISTS identities (
+    ip          TEXT PRIMARY KEY,
+    mac         TEXT,
+    hostname    TEXT,                -- nombre observado (DHCP opción 12, mDNS, DNS inverso)
+    vendor      TEXT,                -- fabricante inferido de la MAC (OUI)
+    source      TEXT,                -- 'dhcp' | 'mdns' | 'dns' | 'arp'
+    updated_at  REAL NOT NULL
+);
 """
 
 
@@ -103,7 +113,7 @@ class Storage:
         return conn
 
     def _init_schema(self) -> None:
-        with self._lock, self._connect() as c:
+        with self._lock, closing(self._connect()) as c:
             c.executescript(_SCHEMA)
             self._migrate(c)
 
@@ -136,7 +146,7 @@ class Storage:
             int(bool(payload.get("blocked"))),
             json.dumps(payload.get("response_log") or [], ensure_ascii=False),
         )
-        with self._lock, self._connect() as c:
+        with self._lock, closing(self._connect()) as c:
             c.execute(
                 """
                 INSERT INTO events (
@@ -158,7 +168,7 @@ class Storage:
         if action not in ("isolate", "unisolate"):
             raise ValueError(f"action inválido: {action!r}")
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        with self._lock, self._connect() as c:
+        with self._lock, closing(self._connect()) as c:
             c.execute(
                 """
                 INSERT INTO isolation_log (
@@ -202,7 +212,7 @@ class Storage:
              ORDER BY received_at DESC
              LIMIT ?
         """
-        with self._lock, self._connect() as c:
+        with self._lock, closing(self._connect()) as c:
             rows = c.execute(sql, params).fetchall()
             return [self._row_to_event(r) for r in rows]
 
@@ -232,7 +242,7 @@ class Storage:
              GROUP BY bucket
              ORDER BY bucket ASC
         """
-        with self._lock, self._connect() as c:
+        with self._lock, closing(self._connect()) as c:
             rows = c.execute(sql, params).fetchall()
             return [
                 {
@@ -248,7 +258,7 @@ class Storage:
 
     def save_flow(self, flow: Dict[str, Any]) -> None:
         """Persiste un flujo NetFlow ya enriquecido con src_node/dst_node."""
-        with self._lock, self._connect() as c:
+        with self._lock, closing(self._connect()) as c:
             c.execute(
                 """
                 INSERT INTO flows (
@@ -297,9 +307,43 @@ class Storage:
              ORDER BY received_at DESC
              LIMIT ?
         """
-        with self._lock, self._connect() as c:
+        with self._lock, closing(self._connect()) as c:
             rows = c.execute(sql, params).fetchall()
             return [dict(r) for r in rows]
+
+    # ---- Identidades de dispositivos (nombre/fabricante por IP) ----
+
+    def upsert_identity(self, ip: str, mac: Optional[str] = None,
+                        hostname: Optional[str] = None, vendor: Optional[str] = None,
+                        source: Optional[str] = None) -> None:
+        """Guarda/actualiza lo que sabemos de un dispositivo por su IP.
+
+        Fusiona: un campo nuevo en NULL no borra el valor ya guardado (COALESCE),
+        así que cada fuente (ARP, DNS, DHCP, mDNS) aporta lo suyo sin pisar al
+        resto. Un valor no-nulo sí reemplaza al anterior (el dato más reciente).
+        """
+        with self._lock, closing(self._connect()) as c:
+            c.execute(
+                """
+                INSERT INTO identities (ip, mac, hostname, vendor, source, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(ip) DO UPDATE SET
+                  mac        = COALESCE(excluded.mac, identities.mac),
+                  hostname   = COALESCE(excluded.hostname, identities.hostname),
+                  vendor     = COALESCE(excluded.vendor, identities.vendor),
+                  source     = COALESCE(excluded.source, identities.source),
+                  updated_at = excluded.updated_at
+                """,
+                (ip, mac, hostname, vendor, source, time.time()),
+            )
+
+    def query_identities(self) -> Dict[str, Dict[str, Any]]:
+        """Todas las identidades conocidas, indexadas por IP."""
+        with self._lock, closing(self._connect()) as c:
+            rows = c.execute(
+                "SELECT ip, mac, hostname, vendor, source, updated_at FROM identities"
+            ).fetchall()
+            return {r["ip"]: dict(r) for r in rows}
 
     def query_isolation_log(self, since: Optional[float] = None, limit: int = 100) -> List[Dict[str, Any]]:
         clauses: List[str] = []
@@ -316,7 +360,7 @@ class Storage:
              ORDER BY received_at DESC
              LIMIT ?
         """
-        with self._lock, self._connect() as c:
+        with self._lock, closing(self._connect()) as c:
             rows = c.execute(sql, params).fetchall()
             return [
                 {
@@ -334,7 +378,7 @@ class Storage:
 
     def stats(self) -> Dict[str, Any]:
         """Métricas agregadas para `/api/stats` post-restart."""
-        with self._lock, self._connect() as c:
+        with self._lock, closing(self._connect()) as c:
             row = c.execute(
                 """
                 SELECT

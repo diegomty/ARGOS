@@ -32,11 +32,17 @@
         <button class="rail-item active" data-view="centinela" title="Red · topología en vivo autodescubierta">
           <span class="rail-ico">◈</span><span class="rail-txt">Red</span>
         </button>
+        <button class="rail-item" data-view="gemelo" title="Gemelo Digital 3D · red en vivo">
+          <span class="rail-ico">◍</span><span class="rail-txt">Gemelo</span>
+        </button>
         <button class="rail-item" data-view="flujos" title="Flujos NetFlow en vivo">
           <span class="rail-ico">⇄</span><span class="rail-txt">Flujos</span>
         </button>
         <button class="rail-item" data-view="anomalias" title="Anomalías detectadas">
           <span class="rail-ico">△</span><span class="rail-txt">Anomalías</span>
+        </button>
+        <button class="rail-item" data-view="honeypot" title="Honeypot · señuelos de intrusión">
+          <span class="rail-ico">✷</span><span class="rail-txt">Honeypot</span>
         </button>
         <span class="rail-spacer"></span>
         <button class="rail-item" data-view="config" title="Configuración y estado">
@@ -159,6 +165,21 @@
     </section>
         </section><!-- /view-centinela (Red) -->
 
+        <section class="view view-gemelo" data-view="gemelo">
+          <div class="map-shell">
+            <div class="map-header">
+              <span class="map-title"><span class="key">◍</span>Gemelo Digital · red en vivo</span>
+              <div class="map-tools">
+                <button id="twin-reload" class="map-btn">⟳ Actualizar</button>
+                <span class="map-hint" id="twin-status">—</span>
+              </div>
+            </div>
+            <div class="map-canvas-wrap" id="twin-wrap">
+              <div class="map-empty" id="twin-empty">Construyendo el gemelo 3D…</div>
+            </div>
+          </div>
+        </section>
+
         <section class="view view-flujos" data-view="flujos">
           <div class="table-shell">
             <div class="table-header">
@@ -193,6 +214,41 @@
                 <tbody id="anom-body"></tbody>
               </table>
               <div class="table-empty" id="anom-empty">Sin anomalías detectadas — el sistema está en calma</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="view view-honeypot" data-view="honeypot">
+          <div class="config-shell">
+            <div class="table-header">
+              <span class="map-title"><span class="key">✷</span>Honeypot · señuelos de intrusión</span>
+              <span class="map-hint" id="hp-status">—</span>
+            </div>
+            <div class="config-body">
+              <div class="config-card">
+                <div class="config-card-title">Estado</div>
+                <div class="config-rows" id="hp-state">cargando…</div>
+                <div class="config-actions">
+                  <button id="hp-toggle" class="btn-action btn-isolate">Activar / Desactivar</button>
+                  <button id="hp-test" class="btn-action btn-reactivate">Probar señuelo</button>
+                  <div class="config-msg" id="hp-msg"></div>
+                </div>
+              </div>
+              <div class="config-card">
+                <div class="config-card-title">Señuelos (puertos trampa)</div>
+                <div class="config-rows" id="hp-ports"></div>
+                <div class="config-hint">Cualquier conexión a estos puertos es sospechosa por definición: nadie legítimo toca un servicio falso.</div>
+              </div>
+              <div class="config-card">
+                <div class="config-card-title">Hits recientes · conexiones a señuelos</div>
+                <div class="table-wrap">
+                  <table class="data-table">
+                    <thead><tr><th>Hora</th><th>Origen</th><th>Señuelo</th><th>Datos capturados</th></tr></thead>
+                    <tbody id="hp-hits"></tbody>
+                  </table>
+                  <div class="table-empty" id="hp-empty">— sin hits todavía · usa «Probar señuelo» o conéctate a un puerto trampa —</div>
+                </div>
+              </div>
             </div>
           </div>
         </section>
@@ -279,8 +335,10 @@
     <script type="module" src="/js/main.js"></script>
     <script type="module" src="/js/console.js"></script>
     <script type="module" src="/js/mapview.js"></script>
+    <script type="module" src="/js/twinview.js"></script>
     <script type="module" src="/js/flowsview.js"></script>
     <script type="module" src="/js/anomaliesview.js"></script>
+    <script type="module" src="/js/honeypotview.js"></script>
     <script type="module" src="/js/configview.js"></script>
   </body>
 </html>

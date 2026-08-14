@@ -74,6 +74,9 @@ class HoneypotListener:
             t.join(timeout=2)
         self._threads = []
 
+    def is_running(self) -> bool:
+        return bool(self._threads)
+
     def stats(self) -> Dict[str, Any]:
         return {"hits": self._hits, "errors": self._errors,
                 "puertos": list(self.decoys)}

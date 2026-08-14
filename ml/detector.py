@@ -48,6 +48,12 @@ class HybridDetector:
         self._flagged = 0
         try:
             self._inherited = joblib.load(model_path)
+            # Predecir un flujo a la vez no se beneficia del paralelismo; forzar
+            # n_jobs=1 evita el UserWarning de joblib en cada predicción.
+            try:
+                self._inherited.n_jobs = 1
+            except Exception:
+                pass
             print(f"[ml] modelo heredado cargado: {model_path.name}", flush=True)
         except FileNotFoundError:
             self._inherited_error = (
