@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import datetime
 from typing import Any, Callable, Dict, Optional
 
 from scapy.all import AsyncSniffer, IP, TCP, UDP, DHCP, BOOTP, DNS, DNSRR
@@ -26,6 +27,26 @@ PROTOCOLOS: Dict[int, str] = {1: "icmp", 6: "tcp", 17: "udp", 2: "igmp", 47: "gr
 FlowCallback = Callable[[Dict[str, Any]], None]
 # on_identity(ip, mac, hostname, source): un dispositivo se dio a conocer.
 IdentityCallback = Callable[[str, Optional[str], Optional[str], str], None]
+# on_alert(alert_dict): se detectó un ataque por TASA (p. ej. un flood DoS).
+AlertCallback = Callable[[Dict[str, Any]], None]
+
+# --- Detector de flood/DoS por tasa ---
+# Un flood se mide por (origen -> destino:puerto-destino), IGNORANDO el puerto
+# de origen: hping3 y muchos DoS lo aleatorizan en cada paquete, así que el
+# ataque se parte en miles de flujos de 1 paquete. Agregando por ese trío, la
+# tormenta reaparece como una tasa altísima de paquetes/seg a un mismo objetivo.
+#
+# Para NO confundir un flood con tráfico legítimo de alta tasa (video, QUIC,
+# descargas) se aplican dos firmas: en TCP solo cuentan los SYN puros (un SYN
+# flood), y en UDP/otros se exige que los paquetes sean diminutos (un flood usa
+# paquetes chicos; el streaming usa paquetes grandes ~1200B).
+FLOOD_WINDOW = 1.0          # ventana de medición (s)
+FLOOD_MIN_PPS = 400         # paquetes/seg desde un origen a un destino:puerto
+FLOOD_MIN_PACKETS = 200     # mínimo absoluto en la ventana (evita picos triviales)
+FLOOD_MAX_AVG_BYTES = 150   # tamaño medio máximo (UDP/otros): filtra streaming/QUIC
+FLOOD_COOLDOWN = 10.0       # no repetir la alerta del mismo flood por este tiempo
+# Puertos/destinos ruidosos por diseño (broadcast/descubrimiento): se ignoran.
+FLOOD_IGNORE_PORTS = {53, 67, 68, 137, 138, 1900, 5353, 5355}
 
 
 def _mac_from_chaddr(chaddr: Any) -> Optional[str]:
@@ -98,14 +119,18 @@ class PassiveSensor:
         self._emitted = 0
         self._on_identity: Optional[IdentityCallback] = None
         self._dhcp_names: Dict[str, str] = {}   # mac -> hostname (visto en DHCP)
+        self._on_alert: Optional[AlertCallback] = None
+        self._flood: Dict[tuple, dict] = {}     # (src,dst,dport,proto) -> ventana
 
     # ---- API pública (misma forma que FlowListener) ----
 
     def start(self, on_flow: FlowCallback,
-              on_identity: Optional[IdentityCallback] = None) -> None:
+              on_identity: Optional[IdentityCallback] = None,
+              on_alert: Optional[AlertCallback] = None) -> None:
         if self._sniffer is not None:
             return
         self._on_identity = on_identity
+        self._on_alert = on_alert
         # AsyncSniffer captura en su propio hilo; filtramos a IP en la captura.
         self._sniffer = AsyncSniffer(prn=self._on_packet, store=False,
                                      filter="ip", iface=self.iface)
@@ -142,6 +167,16 @@ class PassiveSensor:
             return
         clave, proto, nbytes = datos
         t = float(paquete.time)
+        # ¿SYN "puro"? (SYN sí, ACK no) — firma de SYN flood; distingue de los
+        # ACK de una descarga normal, que son igual de chicos pero llevan ACK.
+        is_syn = False
+        if clave[4] == 6 and TCP in paquete:
+            try:
+                f = int(paquete[TCP].flags)
+                is_syn = (f & 0x02) != 0 and (f & 0x10) == 0
+            except Exception:
+                pass
+        alert = None
         with self._lock:
             self._packets += 1
             fl = self._flows.get(clave)
@@ -152,9 +187,75 @@ class PassiveSensor:
                 fl["packets"] += 1
                 fl["bytes"] += nbytes
                 fl["last"] = t
-        # Identidad: fuera del lock (puede llamar a storage). Best-effort.
+            alert = self._track_flood(clave, t, nbytes, is_syn)
+        # Callbacks fuera del lock (pueden tocar storage / red). Best-effort.
+        if alert is not None:
+            self._emit_alert(alert)
         if self._on_identity is not None:
             self._extraer_identidad(paquete)
+
+    # ---- Detector de flood/DoS por tasa ----
+
+    @staticmethod
+    def _is_noisy(dst: str, dport: int) -> bool:
+        """True si el destino es broadcast/multicast o un puerto de descubrimiento
+        (SSDP, mDNS, DHCP…): su ráfaga normal no es un ataque."""
+        if dst.startswith(("224.", "239.", "255.")) or dst.endswith(".255"):
+            return True
+        return dport in FLOOD_IGNORE_PORTS
+
+    def _track_flood(self, clave: tuple, t: float, nbytes: int,
+                     is_syn: bool) -> Optional[Dict[str, Any]]:
+        """Cuenta paquetes por (origen, destino, puerto-destino) en ventanas de
+        1 s y decide si es un ATAQUE (no tráfico legítimo de alta tasa):
+          * TCP: solo cuentan los SYN puros (firma de SYN flood); los ACK de una
+            descarga —chicos pero con ACK— no entran.
+          * UDP/otros: además exige paquetes DIMINUTOS (streaming/QUIC usa ~1200B
+            y así queda excluido).
+        Devuelve una alerta (una vez por ventana, con enfriamiento) o None."""
+        if self._on_alert is None:
+            return None
+        src, dst, _sport, dport, proto_num = clave
+        if self._is_noisy(dst, dport):
+            return None
+        if proto_num == 6 and not is_syn:
+            return None    # TCP que no es SYN puro: no es SYN flood
+        key = (src, dst, dport, proto_num)
+        fr = self._flood.get(key)
+        if fr is None:
+            self._flood[key] = {"count": 1, "bytes": nbytes, "start": t, "cooldown": 0.0}
+            return None
+        fr["count"] += 1
+        fr["bytes"] += nbytes
+        elapsed = t - fr["start"]
+        if elapsed < FLOOD_WINDOW:
+            return None
+        pps = fr["count"] / elapsed if elapsed > 0 else fr["count"]
+        avg = fr["bytes"] / max(fr["count"], 1)
+        ataque = (fr["count"] >= FLOOD_MIN_PACKETS and pps >= FLOOD_MIN_PPS
+                  and t >= fr["cooldown"])
+        if proto_num != 6 and avg > FLOOD_MAX_AVG_BYTES:
+            ataque = False    # paquetes grandes = streaming legítimo, no flood
+        alert = None
+        if ataque:
+            fr["cooldown"] = t + FLOOD_COOLDOWN
+            alert = {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                "src_ip": src, "dst_ip": dst, "dst_port": dport,
+                "protocol": PROTOCOLOS.get(proto_num, f"proto-{proto_num}"),
+                "pps": int(pps), "packets": fr["count"], "avg_bytes": int(avg),
+                "kind": "dos-flood",
+            }
+        fr["count"] = 0        # reinicia la ventana
+        fr["bytes"] = 0
+        fr["start"] = t
+        return alert
+
+    def _emit_alert(self, alert: Dict[str, Any]) -> None:
+        try:
+            self._on_alert(alert)
+        except Exception as e:
+            print(f"[sensor] on_alert error: {e}", flush=True)
 
     # ---- Identidad de dispositivos (DHCP / mDNS) ----
 
@@ -237,6 +338,9 @@ class PassiveSensor:
             terminados = [k for k, f in self._flows.items()
                           if forzar or (ahora - f["last"]) > self.inactive_timeout]
             listos = [(k, self._flows.pop(k)) for k in terminados]
+            # Poda del rastreador de flood: descarta ventanas ya inactivas.
+            self._flood = {k: v for k, v in self._flood.items()
+                           if ahora - v["start"] < 60}
         for clave, fl in listos:
             self._emitted += 1
             try:

@@ -227,10 +227,40 @@ def _arrancar_sensor(loop: asyncio.AbstractEventLoop):
         except Exception:
             pass
 
+    def _on_alert(alert):
+        # Ataque por TASA (flood/DoS) detectado por el sensor -> evento anómalo,
+        # igual que un hit de honeypot: persiste, cuenta y se emite por WebSocket
+        # (aparece en Anomalías, sube KPIs y pulsa en rojo en el Gemelo).
+        msg = (f"DoS FLOOD {alert['src_ip']} -> {alert['dst_ip']}:{alert['dst_port']} "
+               f"{alert['pps']} paq/s ({alert['protocol']}, ~{alert.get('avg_bytes', '?')}B/paq)")
+        ev = SentinelEvent(
+            timestamp=alert["timestamp"],
+            raw_message=msg,
+            source_ip=alert["src_ip"],
+            entropy=6.8,               # muy alta: un flood sostenido es severo
+            sha3=hash_sha3(msg),
+            is_trusted=False,
+            is_anomaly=True,
+            attacker_ip=alert["src_ip"],
+            plan="A",
+            blocked=False,
+            response_log=[f"[dos] flood detectado: {alert['pps']} paq/s hacia "
+                          f"{alert['dst_ip']}:{alert['dst_port']}"],
+        )
+        payload = ev.to_dict()
+        try:
+            storage.save_event(payload)
+        except Exception as e:
+            print(f"[storage] save_event (dos) ERROR: {e}", flush=True)
+        manager.record_event(payload)
+        asyncio.run_coroutine_threadsafe(
+            manager.broadcast({"kind": "event", "payload": payload}), loop)
+
     try:
         from core.sensor import PassiveSensor  # import perezoso (scapy)
         sensor = PassiveSensor()
-        sensor.start(lambda flow: _handle_flow(flow, loop), on_identity=_on_identity)
+        sensor.start(lambda flow: _handle_flow(flow, loop),
+                     on_identity=_on_identity, on_alert=_on_alert)
         print("[server] sensor de captura pasiva arrancado", flush=True)
         return sensor
     except Exception as e:
