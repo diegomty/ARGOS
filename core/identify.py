@@ -19,6 +19,7 @@ from __future__ import annotations
 import re
 import socket
 import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Optional
@@ -81,16 +82,52 @@ def arp_table() -> Dict[str, str]:
     now = time.time()
     if now - _arp_cache["t"] < _ARP_TTL:
         return _arp_cache["table"]
+    table = _arp_windows() if sys.platform.startswith("win") else _arp_unix()
+    if table:                       # solo refresca la caché si hubo lectura útil
+        _arp_cache["t"] = now
+        _arp_cache["table"] = table
+        return table
+    return _arp_cache["table"]
+
+
+def _arp_windows() -> Dict[str, str]:
+    """Tabla ARP en Windows: `arp -a` (IP y MAC contiguas, separador '-')."""
     try:
         out = subprocess.run(["arp", "-a"], capture_output=True, text=True,
                              timeout=5).stdout
     except Exception:
-        return _arp_cache["table"]
+        return {}
+    return {ip: _normalize_mac(mac) for ip, mac in _ARP_LINE.findall(out)}
+
+
+def _arp_unix() -> Dict[str, str]:
+    """Tabla ARP en Linux/Kali: `ip neigh` (con respaldo a `arp -n`)."""
     table: Dict[str, str] = {}
-    for ip, mac in _ARP_LINE.findall(out):
-        table[ip] = _normalize_mac(mac)
-    _arp_cache["t"] = now
-    _arp_cache["table"] = table
+    # `ip neigh show` -> "192.168.0.1 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE"
+    try:
+        out = subprocess.run(["ip", "neigh", "show"], capture_output=True,
+                             text=True, timeout=5).stdout
+        for line in out.splitlines():
+            parts = line.split()
+            if "lladdr" in parts:
+                ip, mac = parts[0], parts[parts.index("lladdr") + 1]
+                if _is_mac_like(mac):
+                    table[ip] = _normalize_mac(mac)
+    except Exception:
+        pass
+    if table:
+        return table
+    # Respaldo: `arp -n` -> "192.168.0.1  ether  aa:bb:cc:dd:ee:ff  C  eth0"
+    try:
+        out = subprocess.run(["arp", "-n"], capture_output=True, text=True,
+                             timeout=5).stdout
+        for line in out.splitlines():
+            m = re.search(r"(\d{1,3}(?:\.\d{1,3}){3}).*?"
+                          r"([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})", line)
+            if m:
+                table[m.group(1)] = _normalize_mac(m.group(2))
+    except Exception:
+        pass
     return table
 
 
