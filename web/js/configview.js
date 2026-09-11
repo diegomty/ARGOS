@@ -33,7 +33,7 @@ async function loadStatus() {
     const loc = ml.local || {};
     const ds = disc.stats || {};
     statusEl.innerHTML =
-      row('Servidor', `Q-Sentinel v${health.version || '?'} · ${health.status || '—'}`)
+      row('Servidor', `ARGOS NDR v${health.version || '?'} · ${health.status || '—'}`)
       + row('Detector heredado', ml.inherited_loaded ? 'activo' : 'no cargado')
       + row('Modelo local', loc.ready
         ? `listo (${loc.train_size} flujos)`
