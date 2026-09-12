@@ -34,6 +34,7 @@ from core.analysis import hash_sha3
 from core.events import SentinelEvent
 from core.flowlistener import FlowListener
 from core.honeypot import HoneypotListener, DEFAULT_DECOYS
+from core.soar import SoarEngine
 from core.storage import Storage
 from core.topology import Topology
 from ml.detector import HybridDetector
@@ -49,6 +50,17 @@ detector = HybridDetector()
 
 # Cada cuánto se re-entrena la línea base local con la ventana móvil.
 ML_RETRAIN_INTERVAL_S = 6 * 3600
+
+# Motor SOAR (respuesta automática): decide y ejecuta el bloqueo de IPs
+# atacantes en el firewall local. Arranca en modo MANUAL (seguro); se puede
+# arrancar en automático con SOAR_MODE=auto. La lista blanca (gateway, IP
+# propia, DNS…) se detecta sola para que sea imposible auto-suicidar la red.
+soar = SoarEngine()
+if os.getenv("SOAR_MODE", "").strip().lower() == "auto":
+    try:
+        soar.set_mode("auto")
+    except ValueError:
+        pass
 
 
 # Topología cargada una sola vez al startup. Si falla la carga, el
@@ -167,6 +179,23 @@ _sensor = None
 SENSOR_ENABLED = os.getenv("Q_SENTINEL_SENSOR", "0") == "1"
 
 
+def _soar_log_lines(res: dict, ip: str) -> List[str]:
+    """Convierte el veredicto del SOAR en líneas para el `response_log` del evento."""
+    action = res.get("action")
+    if action == "blocked":
+        return [f"[soar] AUTO-BLOQUEO de {ip} aplicado en el firewall",
+                f"  $ {res.get('command', '')}"]
+    if action == "block_failed":
+        return [f"[soar] auto-bloqueo de {ip} FALLÓ (¿el servidor corre como admin/root?)",
+                f"  $ {res.get('command', '')}"]
+    if action == "skipped":
+        return [f"[soar] {ip} NO se bloquea: {res.get('reason', '')}"]
+    # action == "surfaced" -> modo manual, la decisión es del operador
+    if res.get("blockable"):
+        return [f"[soar] modo manual — {ip} es candidata a bloqueo (usa «Bloquear»)"]
+    return [f"[soar] modo manual — {ip} está en lista blanca ({res.get('reason', '')})"]
+
+
 def _handle_flow(flow: dict, loop: asyncio.AbstractEventLoop) -> None:
     """Procesa un flujo venga de donde venga (NetFlow O el sensor pasivo):
     lo enriquece con topología, lo persiste en SQLite, lo evalúa con el
@@ -231,21 +260,26 @@ def _arrancar_sensor(loop: asyncio.AbstractEventLoop):
         # Ataque por TASA (flood/DoS) detectado por el sensor -> evento anómalo,
         # igual que un hit de honeypot: persiste, cuenta y se emite por WebSocket
         # (aparece en Anomalías, sube KPIs y pulsa en rojo en el Gemelo).
-        msg = (f"DoS FLOOD {alert['src_ip']} -> {alert['dst_ip']}:{alert['dst_port']} "
+        ip = alert["src_ip"]
+        msg = (f"DoS FLOOD {ip} -> {alert['dst_ip']}:{alert['dst_port']} "
                f"{alert['pps']} paq/s ({alert['protocol']}, ~{alert.get('avg_bytes', '?')}B/paq)")
+        # SOAR: en modo auto bloquea la IP (según política); en manual solo la expone.
+        soar_res = soar.on_detection(ip, reason="dos-flood", kind="dos-flood")
+        rlog = [f"[dos] flood detectado: {alert['pps']} paq/s hacia "
+                f"{alert['dst_ip']}:{alert['dst_port']}"]
+        rlog += _soar_log_lines(soar_res, ip)
         ev = SentinelEvent(
             timestamp=alert["timestamp"],
             raw_message=msg,
-            source_ip=alert["src_ip"],
+            source_ip=ip,
             entropy=6.8,               # muy alta: un flood sostenido es severo
             sha3=hash_sha3(msg),
             is_trusted=False,
             is_anomaly=True,
-            attacker_ip=alert["src_ip"],
+            attacker_ip=ip,
             plan="A",
-            blocked=False,
-            response_log=[f"[dos] flood detectado: {alert['pps']} paq/s hacia "
-                          f"{alert['dst_ip']}:{alert['dst_port']}"],
+            blocked=bool(soar_res.get("blocked")),
+            response_log=rlog,
         )
         payload = ev.to_dict()
         try:
@@ -309,22 +343,27 @@ def _arrancar_honeypot(loop: asyncio.AbstractEventLoop) -> HoneypotListener:
     """
 
     def on_hit(hit: dict) -> None:
+        ip = hit["src_ip"]
         msg = (f"HONEYPOT {hit['service']}:{hit['dst_port']} <- "
-               f"{hit['src_ip']}:{hit['src_port']} "
+               f"{ip}:{hit['src_port']} "
                f"data={hit['data'][:120] or '(sin datos)'}")
+        # SOAR: un hit de honeypot es amenaza de máxima confianza (nadie legítimo
+        # toca un señuelo). En modo auto se bloquea; en manual solo se expone.
+        soar_res = soar.on_detection(ip, reason="honeypot", kind="honeypot")
+        rlog = [f"[honeypot] señuelo '{hit['service']}' tocado en puerto {hit['dst_port']}"]
+        rlog += _soar_log_lines(soar_res, ip)
         ev = SentinelEvent(
             timestamp=hit["timestamp"],
             raw_message=msg,
-            source_ip=hit["src_ip"],
+            source_ip=ip,
             entropy=6.5,               # alta: un hit de honeypot es severidad máxima
             sha3=hash_sha3(msg),
             is_trusted=False,
             is_anomaly=True,
-            attacker_ip=hit["src_ip"],
+            attacker_ip=ip,
             plan="A",
-            blocked=False,
-            response_log=[f"[honeypot] señuelo '{hit['service']}' tocado "
-                          f"en puerto {hit['dst_port']}"],
+            blocked=bool(soar_res.get("blocked")),
+            response_log=rlog,
         )
         payload = ev.to_dict()
         try:
@@ -542,6 +581,73 @@ async def honeypot_test() -> JSONResponse:
                          "service": DEFAULT_DECOYS[port][0]})
 
 
+@app.get("/api/soar")
+async def soar_status() -> JSONResponse:
+    """Estado del SOAR: modo, si tiene privilegios, IPs activas, lista blanca."""
+    return JSONResponse(soar.stats())
+
+
+@app.post("/api/soar/mode")
+async def soar_set_mode(req: dict) -> JSONResponse:
+    """Cambia el modo de respuesta: 'manual' (operador decide) o 'auto'."""
+    try:
+        mode = soar.set_mode((req or {}).get("mode"))
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return JSONResponse({"mode": mode, **soar.stats()})
+
+
+@app.get("/api/soar/blocked")
+async def soar_blocked(active_only: bool = False) -> JSONResponse:
+    """Lista de IPs bloqueadas (o intentos), más recientes primero."""
+    return JSONResponse({"blocked": soar.list_blocked(active_only=active_only)})
+
+
+@app.post("/api/block")
+async def soar_block(req: dict) -> JSONResponse:
+    """Bloqueo MANUAL de una IP por el operador (respeta la lista blanca).
+
+    Emite además un SentinelEvent para que la acción aparezca en Anomalías y
+    suba al KPI de «IPs bloqueadas», igual que un bloqueo automático.
+    """
+    ip = (req or {}).get("ip")
+    if not ip:
+        return JSONResponse({"error": "ip requerida"}, status_code=400)
+    reason = (req or {}).get("reason") or "bloqueo manual"
+    rec = await asyncio.to_thread(soar.block, ip, reason, "manual")
+
+    if rec.get("ok"):
+        from datetime import datetime
+        ev = SentinelEvent(
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+            raw_message=f"<SOAR> BLOQUEO MANUAL de {ip} ({reason})",
+            source_ip=ip,
+            entropy=0.0,
+            sha3=hash_sha3(f"block:{ip}:{rec.get('ts')}"),
+            is_trusted=False,
+            is_anomaly=False,
+            attacker_ip=ip,
+            plan="A",
+            blocked=True,
+            response_log=[f"[soar] bloqueo manual de {ip} aplicado en el firewall",
+                          f"  $ {rec.get('command', '')}"],
+        )
+        await _persist_record_and_broadcast(ev.to_dict())
+
+    return JSONResponse(rec, status_code=200 if rec.get("ok")
+                        else (400 if rec.get("skipped") else 502))
+
+
+@app.post("/api/unblock")
+async def soar_unblock(req: dict) -> JSONResponse:
+    """Retira el bloqueo de una IP del firewall local."""
+    ip = (req or {}).get("ip")
+    if not ip:
+        return JSONResponse({"error": "ip requerida"}, status_code=400)
+    rec = await asyncio.to_thread(soar.unblock, ip)
+    return JSONResponse(rec, status_code=200 if rec.get("ok") else 502)
+
+
 @app.get("/api/discovery")
 async def discovery(window: Optional[float] = None, min_flows: int = 2,
                     group_external: bool = True) -> JSONResponse:
@@ -556,13 +662,14 @@ async def discovery(window: Optional[float] = None, min_flows: int = 2,
     * `min_flows`  — descarta nodos con menos flujos (doma el ruido efímero).
     """
     from core.discovery import (discover_from_storage, annotate, filter_graph,
-                                 collapse_external)
+                                 collapse_external, drop_noise)
     from core.identify import enrich_graph
 
     def _build() -> dict:
         graph = discover_from_storage(storage, window_s=window)
         if _topology is not None:
             annotate(graph, _topology)
+        graph = drop_noise(graph)  # quita broadcast/multicast antes de agrupar
         if group_external:
             graph = collapse_external(graph)  # externos -> nodo «Internet»
         graph = filter_graph(graph, max(1, int(min_flows)))
