@@ -44,6 +44,14 @@ PORT_SERVICES: Dict[int, str] = {
 # retorno, no un servicio real expuesto. Se ignoran como "servicio servido".
 EPHEMERAL_MIN = 49152
 
+# Puertos de protocolos de descubrimiento/anuncio: SSDP/UPnP (1900), mDNS
+# (5353), LLMNR (5355), NetBIOS (137/138), WS-Discovery (3702), NAT-PMP/PCP
+# (5350/5351), DHCP-cliente (68). Un host (típicamente el router) que RESPONDE
+# o ANUNCIA por estos puertos hacia muchos puertos efímeros distintos NO es un
+# escáner: es tráfico normal de descubrimiento de red. Excluir su puerto de
+# ORIGEN del conteo de escaneo evita marcar al gateway como "scanner".
+DISCOVERY_PORTS = {1900, 5353, 5355, 137, 138, 3702, 5350, 5351, 68, 5678}
+
 # --- Reglas de rol: (conjunto de puertos, rol, prioridad). Mayor prioridad
 #     gana cuando un host expone varios tipos de servicio. ---
 ROLE_RULES: List[tuple] = [
@@ -151,10 +159,11 @@ def build_graph(flows: List[Dict[str, Any]]) -> Dict[str, Any]:
             n_served[d][dp].add(s)
             n_served_bytes[d][dp] += b
         # Solo cuenta para el escaneo si el ORIGEN no es un puerto de servicio
-        # conocido: un servidor respondiendo usa su puerto conocido (53, 443…)
-        # hacia puertos efímeros del cliente — eso es tráfico de retorno, no
-        # un escaneo. Un escáner de verdad usa un puerto de origen efímero.
-        if dp != 0 and sp not in PORT_SERVICES:
+        # conocido NI de descubrimiento: un servidor respondiendo usa su puerto
+        # conocido (53, 443…) y el router anuncia por SSDP/mDNS (1900, 5353…)
+        # hacia puertos efímeros del cliente — eso es tráfico de retorno, no un
+        # escaneo. Un escáner de verdad usa un puerto de origen efímero.
+        if dp != 0 and sp not in PORT_SERVICES and sp not in DISCOVERY_PORTS:
             port_pairs[(s, d)].add(dp)
 
         for node in (s, d):
@@ -401,6 +410,43 @@ def collapse_external(graph: Dict[str, Any]) -> Dict[str, Any]:
     stats["collapsed_external"] = len(ext)
     stats["kept_external"] = len(keep_ext)
     return {**graph, "nodes": new_nodes, "edges": new_edges, "stats": stats}
+
+
+def _is_noise(ip: str) -> bool:
+    """True si la IP es ruido de red (broadcast/multicast/sin especificar).
+
+    No son hosts reales: nadie «vive» en 255.255.255.255 ni en 239.255.255.250.
+    Ensucian el mapa con nodos y relaciones que no aportan. El nodo agregado
+    «Internet» se preserva explícitamente (su id no es una IP parseable).
+    """
+    if ip == INTERNET_ID:
+        return False
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return True
+    if a.is_multicast or a.is_unspecified or a.is_reserved:
+        return True
+    # Broadcast global y broadcast de /24 (heurística: último octeto .255).
+    if ip == "255.255.255.255" or ip.endswith(".255"):
+        return True
+    return False
+
+
+def drop_noise(graph: Dict[str, Any]) -> Dict[str, Any]:
+    """Quita del grafo los nodos de ruido (broadcast/multicast) y sus aristas."""
+    kept = {n["id"] for n in graph["nodes"] if not _is_noise(n["ip"])}
+    if len(kept) == len(graph["nodes"]):
+        return graph
+    nodes = [n for n in graph["nodes"] if n["id"] in kept]
+    edges = [e for e in graph["edges"]
+             if e["source"] in kept and e["target"] in kept]
+    stats = dict(graph["stats"])
+    stats["node_count"] = len(nodes)
+    stats["edge_count"] = len(edges)
+    stats["scanners"] = sum(1 for n in nodes if n["is_scanner"])
+    stats["noise_dropped"] = len(graph["nodes"]) - len(nodes)
+    return {**graph, "nodes": nodes, "edges": edges, "stats": stats}
 
 
 def filter_graph(graph: Dict[str, Any], min_flows: int = 1) -> Dict[str, Any]:
