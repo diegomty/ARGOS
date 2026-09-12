@@ -82,7 +82,12 @@ async function load() {
   try {
     // min_flows configurable desde el módulo Config (persistido en localStorage).
     const mf = localStorage.getItem('qs_min_flows') || '2';
-    const g = await fetch(`/api/discovery?min_flows=${encodeURIComponent(mf)}`).then(r => r.json());
+    // Ventana temporal: solo lo reciente (descarta arriendos DHCP viejos, IPs
+    // pasadas). '0' = todo el histórico. La elige el selector de la barra.
+    const win = localStorage.getItem('qs_window') ?? '86400';
+    let url = `/api/discovery?min_flows=${encodeURIComponent(mf)}`;
+    if (win && win !== '0') url += `&window=${encodeURIComponent(win)}`;
+    const g = await fetch(url).then(r => r.json());
     const cx = W / 2, cy = H / 2;
     nodes = g.nodes.map((n, i) => {
       const a = (i / g.nodes.length) * Math.PI * 2;
@@ -267,15 +272,19 @@ function fmtBytes(b) {
 }
 
 // Vecinos separados por dirección (a quién habla / quién le habla), con flujos.
+// Agrupamos por host: hay una arista por puerto de servicio, así que un mismo
+// vecino puede aparecer varias veces; aquí sumamos sus flujos en una sola fila.
 function neighborsOf(node) {
-  const out = [], inc = [];
+  const outM = new Map(), incM = new Map();
+  const add = (m, id, flows) => m.set(id, (m.get(id) || 0) + (flows || 0));
   for (const e of edges) {
-    if (e.source === node.id) out.push({ id: e.target, flows: e.flows || 0 });
-    else if (e.target === node.id) inc.push({ id: e.source, flows: e.flows || 0 });
+    if (e.source === node.id) add(outM, e.target, e.flows);
+    else if (e.target === node.id) add(incM, e.source, e.flows);
   }
-  out.sort((a, b) => b.flows - a.flows);
-  inc.sort((a, b) => b.flows - a.flows);
-  return { out, inc };
+  const toList = (m) => [...m.entries()]
+    .map(([id, flows]) => ({ id, flows }))
+    .sort((a, b) => b.flows - a.flows);
+  return { out: toList(outM), inc: toList(incM) };
 }
 
 // Rellena y muestra el panel con el detalle del nodo enfocado.
@@ -534,6 +543,17 @@ if (analyzeBtn) analyzeBtn.addEventListener('click', async () => {
 // Botón "Organizar": reacomodo automático agrupado (relayout).
 const organizeBtn = document.getElementById('map-organize');
 if (organizeBtn) organizeBtn.addEventListener('click', () => organize());
+
+// Selector de ventana temporal: refleja lo guardado y re-mapea al cambiar.
+const windowSel = document.getElementById('map-window');
+if (windowSel) {
+  const saved = localStorage.getItem('qs_window');
+  if (saved !== null) windowSel.value = saved;
+  windowSel.addEventListener('change', async () => {
+    localStorage.setItem('qs_window', windowSel.value);
+    if (loaded) { statusEl.textContent = 'aplicando ventana…'; await load(); }
+  });
+}
 
 // --- Ciclo de vida atado a la conmutación de vistas ---
 // La vista de red usa el id "centinela" (era la principal); arranca al mostrarse

@@ -32,8 +32,8 @@
         <button class="rail-item active" data-view="centinela" title="Red · topología en vivo autodescubierta">
           <span class="rail-ico">◈</span><span class="rail-txt">Red</span>
         </button>
-        <button class="rail-item" data-view="gemelo" title="Gemelo Digital 3D · red en vivo">
-          <span class="rail-ico">◍</span><span class="rail-txt">Gemelo</span>
+        <button class="rail-item" data-view="inventario" title="Inventario de dispositivos · activos de la red">
+          <span class="rail-ico">▦</span><span class="rail-txt">Inventario</span>
         </button>
         <button class="rail-item" data-view="flujos" title="Flujos NetFlow en vivo">
           <span class="rail-ico">⇄</span><span class="rail-txt">Flujos</span>
@@ -43,6 +43,9 @@
         </button>
         <button class="rail-item" data-view="honeypot" title="Honeypot · señuelos de intrusión">
           <span class="rail-ico">✷</span><span class="rail-txt">Honeypot</span>
+        </button>
+        <button class="rail-item" data-view="soar" title="SOAR · respuesta automática (bloqueo de IPs)">
+          <span class="rail-ico">⊘</span><span class="rail-txt">SOAR</span>
         </button>
         <span class="rail-spacer"></span>
         <button class="rail-item" data-view="config" title="Configuración y estado">
@@ -102,6 +105,16 @@
             <div class="map-tools">
               <button id="map-analyze" class="map-btn">▶ Analizar red</button>
               <button id="map-organize" class="map-btn">⟳ Organizar</button>
+              <label class="map-window-lbl" title="Ventana de tiempo: descarta lo viejo (arriendos DHCP caducados, IPs pasadas)">
+                ⏱
+                <select id="map-window" class="map-select">
+                  <option value="3600">Última hora</option>
+                  <option value="21600">Últimas 6 h</option>
+                  <option value="86400" selected>Último día</option>
+                  <option value="604800">Última semana</option>
+                  <option value="0">Todo el histórico</option>
+                </select>
+              </label>
               <span class="map-hint" id="map-status">—</span>
             </div>
           </div>
@@ -165,17 +178,40 @@
     </section>
         </section><!-- /view-centinela (Red) -->
 
-        <section class="view view-gemelo" data-view="gemelo">
-          <div class="map-shell">
-            <div class="map-header">
-              <span class="map-title"><span class="key">◍</span>Gemelo Digital · red en vivo</span>
+        <section class="view view-inventario" data-view="inventario">
+          <div class="table-shell">
+            <div class="table-header">
+              <span class="map-title"><span class="key">▦</span>Inventario de dispositivos</span>
               <div class="map-tools">
-                <button id="twin-reload" class="map-btn">⟳ Actualizar</button>
-                <span class="map-hint" id="twin-status">—</span>
+                <label class="map-window-lbl" title="Ventana de tiempo: dispositivos vistos en el periodo">
+                  ⏱
+                  <select id="inv-window" class="map-select">
+                    <option value="3600">Última hora</option>
+                    <option value="21600">Últimas 6 h</option>
+                    <option value="86400" selected>Último día</option>
+                    <option value="604800">Última semana</option>
+                    <option value="0">Todo el histórico</option>
+                  </select>
+                </label>
+                <select id="inv-filter" class="map-select" title="Filtrar por tipo">
+                  <option value="todos">Todos</option>
+                  <option value="riesgo">Con riesgo</option>
+                  <option value="servidores">Servidores</option>
+                  <option value="clientes">Clientes</option>
+                </select>
+                <button id="inv-refresh" class="map-btn">↻ Actualizar</button>
+                <span class="map-hint" id="inv-status">—</span>
               </div>
             </div>
-            <div class="map-canvas-wrap" id="twin-wrap">
-              <div class="map-empty" id="twin-empty">Construyendo el gemelo 3D…</div>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead><tr>
+                  <th>IP</th><th>Fabricante</th><th>Hostname</th><th>MAC</th>
+                  <th>Rol</th><th>Servicios</th><th>Última vez</th><th>Riesgo</th>
+                </tr></thead>
+                <tbody id="inv-body"></tbody>
+              </table>
+              <div class="table-empty" id="inv-empty">Pulsa «↻ Actualizar» para inventariar la red</div>
             </div>
           </div>
         </section>
@@ -247,6 +283,48 @@
                     <tbody id="hp-hits"></tbody>
                   </table>
                   <div class="table-empty" id="hp-empty">— sin hits todavía · usa «Probar señuelo» o conéctate a un puerto trampa —</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="view view-soar" data-view="soar">
+          <div class="config-shell">
+            <div class="table-header">
+              <span class="map-title"><span class="key">⊘</span>SOAR · Respuesta automática</span>
+              <span class="map-hint" id="soar-status">—</span>
+            </div>
+            <div class="config-body">
+              <div class="config-card">
+                <div class="config-card-title">Modo de respuesta</div>
+                <div class="soar-modes">
+                  <button id="soar-mode-manual" class="btn-action soar-mode-btn">Manual</button>
+                  <button id="soar-mode-auto" class="btn-action soar-mode-btn">Automático</button>
+                </div>
+                <div class="config-hint" id="soar-mode-hint">—</div>
+                <div class="config-msg" id="soar-msg"></div>
+              </div>
+              <div class="config-card">
+                <div class="config-card-title">Estado del motor</div>
+                <div class="config-rows" id="soar-state">cargando…</div>
+              </div>
+              <div class="config-card">
+                <div class="config-card-title">Bloquear una IP a mano</div>
+                <div class="config-inline">
+                  <input type="text" id="soar-ip" placeholder="p. ej. 192.168.0.150" />
+                  <button id="soar-block" class="btn-action btn-isolate">Bloquear</button>
+                </div>
+                <div class="config-hint">Aplica una regla en el firewall local (netsh en Windows · iptables en Linux/Kali). La lista blanca —gateway, IP propia, DNS— nunca se bloquea.</div>
+              </div>
+              <div class="config-card">
+                <div class="config-card-title">IPs bloqueadas</div>
+                <div class="table-wrap">
+                  <table class="data-table">
+                    <thead><tr><th>Hora</th><th>IP</th><th>Motivo</th><th>Origen</th><th>Estado</th><th></th></tr></thead>
+                    <tbody id="soar-blocked-body"></tbody>
+                  </table>
+                  <div class="table-empty" id="soar-blocked-empty">— sin bloqueos todavía —</div>
                 </div>
               </div>
             </div>
@@ -335,10 +413,11 @@
     <script type="module" src="/js/main.js"></script>
     <script type="module" src="/js/console.js"></script>
     <script type="module" src="/js/mapview.js"></script>
-    <script type="module" src="/js/twinview.js"></script>
+    <script type="module" src="/js/inventoryview.js"></script>
     <script type="module" src="/js/flowsview.js"></script>
     <script type="module" src="/js/anomaliesview.js"></script>
     <script type="module" src="/js/honeypotview.js"></script>
+    <script type="module" src="/js/soarview.js"></script>
     <script type="module" src="/js/configview.js"></script>
   </body>
 </html>
