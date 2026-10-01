@@ -84,7 +84,8 @@ CREATE TABLE IF NOT EXISTS identities (
     mac         TEXT,
     hostname    TEXT,                -- nombre observado (DHCP opción 12, mDNS, DNS inverso)
     vendor      TEXT,                -- fabricante inferido de la MAC (OUI)
-    source      TEXT,                -- 'dhcp' | 'mdns' | 'dns' | 'arp'
+    device_type TEXT,                -- tipo de dispositivo (SSDP/UPnP): TV, Impresora, Router…
+    source      TEXT,                -- 'dhcp' | 'mdns' | 'dns' | 'arp' | 'ssdp'
     updated_at  REAL NOT NULL
 );
 """
@@ -127,6 +128,9 @@ class Storage:
         cols = {r["name"] for r in c.execute("PRAGMA table_info(flows)")}
         if "duration_ms" not in cols:
             c.execute("ALTER TABLE flows ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0")
+        icols = {r["name"] for r in c.execute("PRAGMA table_info(identities)")}
+        if "device_type" not in icols:
+            c.execute("ALTER TABLE identities ADD COLUMN device_type TEXT")
 
     # ---- Writes ----
 
@@ -315,33 +319,35 @@ class Storage:
 
     def upsert_identity(self, ip: str, mac: Optional[str] = None,
                         hostname: Optional[str] = None, vendor: Optional[str] = None,
-                        source: Optional[str] = None) -> None:
+                        source: Optional[str] = None,
+                        device_type: Optional[str] = None) -> None:
         """Guarda/actualiza lo que sabemos de un dispositivo por su IP.
 
         Fusiona: un campo nuevo en NULL no borra el valor ya guardado (COALESCE),
-        así que cada fuente (ARP, DNS, DHCP, mDNS) aporta lo suyo sin pisar al
-        resto. Un valor no-nulo sí reemplaza al anterior (el dato más reciente).
+        así que cada fuente (ARP, DNS, DHCP, mDNS, SSDP) aporta lo suyo sin pisar
+        al resto. Un valor no-nulo sí reemplaza al anterior (el dato más reciente).
         """
         with self._lock, closing(self._connect()) as c:
             c.execute(
                 """
-                INSERT INTO identities (ip, mac, hostname, vendor, source, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO identities (ip, mac, hostname, vendor, device_type, source, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(ip) DO UPDATE SET
-                  mac        = COALESCE(excluded.mac, identities.mac),
-                  hostname   = COALESCE(excluded.hostname, identities.hostname),
-                  vendor     = COALESCE(excluded.vendor, identities.vendor),
-                  source     = COALESCE(excluded.source, identities.source),
-                  updated_at = excluded.updated_at
+                  mac         = COALESCE(excluded.mac, identities.mac),
+                  hostname    = COALESCE(excluded.hostname, identities.hostname),
+                  vendor      = COALESCE(excluded.vendor, identities.vendor),
+                  device_type = COALESCE(excluded.device_type, identities.device_type),
+                  source      = COALESCE(excluded.source, identities.source),
+                  updated_at  = excluded.updated_at
                 """,
-                (ip, mac, hostname, vendor, source, time.time()),
+                (ip, mac, hostname, vendor, device_type, source, time.time()),
             )
 
     def query_identities(self) -> Dict[str, Dict[str, Any]]:
         """Todas las identidades conocidas, indexadas por IP."""
         with self._lock, closing(self._connect()) as c:
             rows = c.execute(
-                "SELECT ip, mac, hostname, vendor, source, updated_at FROM identities"
+                "SELECT ip, mac, hostname, vendor, device_type, source, updated_at FROM identities"
             ).fetchall()
             return {r["ip"]: dict(r) for r in rows}
 

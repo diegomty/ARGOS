@@ -20,13 +20,36 @@ import time
 from datetime import datetime
 from typing import Any, Callable, Dict, Optional
 
-from scapy.all import AsyncSniffer, IP, TCP, UDP, DHCP, BOOTP, DNS, DNSRR
+import re
+
+from scapy.all import AsyncSniffer, IP, TCP, UDP, DHCP, BOOTP, DNS, DNSRR, Raw
 
 PROTOCOLOS: Dict[int, str] = {1: "icmp", 6: "tcp", 17: "udp", 2: "igmp", 47: "gre"}
 
 FlowCallback = Callable[[Dict[str, Any]], None]
-# on_identity(ip, mac, hostname, source): un dispositivo se dio a conocer.
-IdentityCallback = Callable[[str, Optional[str], Optional[str], str], None]
+# on_identity(ip, mac, hostname, source, device_type): un dispositivo se dio a
+# conocer. device_type (SSDP/UPnP) es opcional: TV, Impresora, Router…
+IdentityCallback = Callable[..., None]
+
+# --- Tipos de dispositivo UPnP (SSDP) -> etiqueta legible ---
+# El tipo viene en la cabecera NT/ST/USN como `urn:...:device:<Tipo>:<ver>`.
+UPNP_DEVICE_TIPOS: Dict[str, str] = {
+    "mediarenderer": "Reproductor multimedia",
+    "mediaserver": "Servidor multimedia",
+    "internetgatewaydevice": "Router/Gateway",
+    "wandevice": "Router/Gateway",
+    "wanconnectiondevice": "Router/Gateway",
+    "landevice": "Router/Gateway",
+    "printer": "Impresora",
+    "printerbasic": "Impresora",
+    "printbasic": "Impresora",
+    "dimmablelight": "Luz inteligente",
+    "binarylight": "Luz inteligente",
+    "digitalsecuritycamera": "Cámara",
+    "wfadevice": "Dispositivo Wi-Fi",
+    "basic": "Dispositivo UPnP",
+}
+_SSDP_DEVICE_RE = re.compile(r":device:([A-Za-z0-9_]+):", re.IGNORECASE)
 # on_alert(alert_dict): se detectó un ataque por TASA (p. ej. un flood DoS).
 AlertCallback = Callable[[Dict[str, Any]], None]
 
@@ -119,6 +142,8 @@ class PassiveSensor:
         self._emitted = 0
         self._on_identity: Optional[IdentityCallback] = None
         self._dhcp_names: Dict[str, str] = {}   # mac -> hostname (visto en DHCP)
+        self._ssdp_seen: set = set()            # (ip, device_type) ya emitidos (anti-spam)
+        self._ignored: set = set()              # IPs ya bloqueadas: su trafico se descarta
         self._on_alert: Optional[AlertCallback] = None
         self._flood: Dict[tuple, dict] = {}     # (src,dst,dport,proto) -> ventana
 
@@ -156,12 +181,31 @@ class PassiveSensor:
     def stats(self) -> Dict[str, Any]:
         with self._lock:
             activos = len(self._flows)
-        return {"packets": self._packets, "emitted": self._emitted, "active": activos}
+        return {"packets": self._packets, "emitted": self._emitted, "active": activos,
+                "ignored": len(self._ignored)}
+
+    def ignore_source(self, ip: str) -> None:
+        """Deja de procesar el tráfico de `ip` (típicamente porque el SOAR ya la
+        bloqueó). Así un atacante bloqueado no puede seguir cargando el sensor."""
+        if ip:
+            self._ignored.add(ip)
+            print(f"[sensor] ignorando a {ip} (ya bloqueada) — no se re-procesa", flush=True)
+
+    def unignore_source(self, ip: str) -> None:
+        """Reverso de `ignore_source`: vuelve a vigilar a `ip` (tras desbloquearla)."""
+        self._ignored.discard(ip)
 
     # ---- Internos ----
 
     def _on_packet(self, paquete) -> None:
         """Callback de captura: acumula el paquete en su flujo (bajo lock)."""
+        # Fuentes YA bloqueadas: se descartan aquí mismo. El firewall/router ya
+        # tira sus paquetes; esto evita RE-procesarlos, de modo que un atacante
+        # bloqueado no genere re-detecciones, reglas duplicadas ni pueda saturar
+        # el sensor con un flood sostenido. El `self._ignored and` corta rápido
+        # cuando no hay nadie bloqueado (caso normal).
+        if self._ignored and IP in paquete and paquete[IP].src in self._ignored:
+            return
         datos = _extraer(paquete)
         if datos is None:
             return
@@ -269,6 +313,8 @@ class PassiveSensor:
                 self._identidad_dhcp(paquete)
             elif sport == 5353 or dport == 5353:
                 self._identidad_mdns(paquete)
+            elif sport == 1900 or dport == 1900:
+                self._identidad_ssdp(paquete)
         except Exception:
             pass  # un parseo raro nunca debe romper la captura
 
@@ -316,12 +362,41 @@ class PassiveSensor:
             rr = nxt if isinstance(nxt, DNSRR) else None
             vistos += 1
 
+    def _identidad_ssdp(self, paquete) -> None:
+        """SSDP/UPnP: los dispositivos anuncian su TIPO (TV, impresora, router…).
+
+        Solo miramos NOTIFY (anuncios) y respuestas `HTTP 200 OK` — describen al
+        equipo que las envía (ip.src). Un `M-SEARCH` es una consulta y no describe
+        a nadie. El tipo viene en NT/ST/USN como `urn:...:device:<Tipo>:<ver>`.
+        """
+        if Raw not in paquete:
+            return
+        try:
+            texto = bytes(paquete[Raw].load).decode("latin-1", errors="ignore")
+        except Exception:
+            return
+        primera = texto.split("\r\n", 1)[0].upper()
+        if not (primera.startswith("NOTIFY") or primera.startswith("HTTP/")):
+            return  # M-SEARCH u otro: no describe un dispositivo
+        m = _SSDP_DEVICE_RE.search(texto)
+        if not m:
+            return
+        tipo_raw = m.group(1)
+        tipo = UPNP_DEVICE_TIPOS.get(tipo_raw.lower(), tipo_raw)
+        ip = paquete[IP].src
+        clave = (ip, tipo)
+        if clave in self._ssdp_seen:
+            return   # ya emitido: no repetir (SSDP es muy verboso)
+        self._ssdp_seen.add(clave)
+        self._emitir_identidad(ip, None, None, "ssdp", device_type=tipo)
+
     def _emitir_identidad(self, ip: str, mac: Optional[str],
-                          hostname: Optional[str], source: str) -> None:
+                          hostname: Optional[str], source: str,
+                          device_type: Optional[str] = None) -> None:
         if self._on_identity is None or not ip:
             return
         try:
-            self._on_identity(ip, mac, hostname, source)
+            self._on_identity(ip, mac, hostname, source, device_type)
         except Exception as e:
             print(f"[sensor] on_identity error: {e}", flush=True)
 

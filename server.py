@@ -177,10 +177,16 @@ _sensor = None
 # El sensor de captura pasiva es OPT-IN porque requiere admin: se activa
 # arrancando el servidor con la variable de entorno Q_SENTINEL_SENSOR=1.
 SENSOR_ENABLED = os.getenv("Q_SENTINEL_SENSOR", "0") == "1"
+# Interfaz a capturar por el sensor. Sin esto, scapy elige la del route por
+# defecto (p. ej. Wi-Fi). En un despliegue con varias NICs (VMnet, etc.) hay
+# que apuntarlo a la del segmento monitoreado: Q_SENTINEL_IFACE="VMnet8".
+SENSOR_IFACE = os.getenv("Q_SENTINEL_IFACE") or None
 
 
 def _soar_log_lines(res: dict, ip: str) -> List[str]:
     """Convierte el veredicto del SOAR en líneas para el `response_log` del evento."""
+    if res.get("deduped"):
+        return [f"[soar] {ip} ya estaba bloqueada — sin cambios (no se re-aplica la regla)"]
     action = res.get("action")
     if action == "blocked":
         return [f"[soar] AUTO-BLOQUEO de {ip} aplicado en el firewall",
@@ -249,10 +255,11 @@ def _arrancar_sensor(loop: asyncio.AbstractEventLoop):
     Npcap/libpcap. Se activa con la variable de entorno Q_SENTINEL_SENSOR=1.
     Si algo falla, degrada con gracia sin tumbar el servidor.
     """
-    def _on_identity(ip, mac, hostname, source):
-        # Nombre/MAC observados pasivamente (DHCP/mDNS) -> tabla de identidades.
+    def _on_identity(ip, mac, hostname, source, device_type=None):
+        # Nombre/MAC/tipo observados pasivamente (DHCP/mDNS/SSDP) -> identidades.
         try:
-            storage.upsert_identity(ip, mac=mac, hostname=hostname, source=source)
+            storage.upsert_identity(ip, mac=mac, hostname=hostname, source=source,
+                                    device_type=device_type)
         except Exception:
             pass
 
@@ -292,10 +299,16 @@ def _arrancar_sensor(loop: asyncio.AbstractEventLoop):
 
     try:
         from core.sensor import PassiveSensor  # import perezoso (scapy)
-        sensor = PassiveSensor()
+        sensor = PassiveSensor(iface=SENSOR_IFACE)
         sensor.start(lambda flow: _handle_flow(flow, loop),
                      on_identity=_on_identity, on_alert=_on_alert)
-        print("[server] sensor de captura pasiva arrancado", flush=True)
+        # Al bloquear/desbloquear una IP, el SOAR le avisa al sensor para que
+        # deje de procesar (o vuelva a vigilar) su tráfico. Así un atacante
+        # bloqueado no genera re-detecciones ni puede saturar el sensor.
+        soar.on_block_change = lambda ip, active: (
+            sensor.ignore_source(ip) if active else sensor.unignore_source(ip))
+        print(f"[server] sensor de captura pasiva arrancado "
+              f"(iface={SENSOR_IFACE or 'default'})", flush=True)
         return sensor
     except Exception as e:
         print(f"[sensor] no se pudo iniciar (¿admin? ¿Npcap? ¿scapy?): {e}", flush=True)

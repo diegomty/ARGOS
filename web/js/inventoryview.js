@@ -69,6 +69,7 @@ function render() {
       + `<td>${esc(n.hostname || n.device_name || '—')}</td>`
       + `<td class="mono muted">${esc(n.mac || '—')}</td>`
       + `<td>${esc(n.role || '—')}</td>`
+      + `<td>${n.device_type ? esc(n.device_type) : '<span class="muted">—</span>'}</td>`
       + `<td class="inv-svc">${svcNames ? esc(svcNames) : '<span class="muted">—</span>'}</td>`
       + `<td class="muted">${fmtAgo(n.last_seen)}</td>`
       + `<td>${riskCell}</td></tr>`;

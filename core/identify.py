@@ -243,8 +243,12 @@ def enrich_graph(graph: Dict[str, Any], storage: Any) -> Dict[str, Any]:
         node["mac"] = mac
         node["vendor"] = vendor
         node["hostname"] = hostname
-        # Nombre a mostrar en el mapa: hostname > fabricante > (nada -> la IP).
-        nombre = hostname or vendor
+        # Tipo de dispositivo observado por SSDP/UPnP (TV, impresora, router…).
+        device_type = prev.get("device_type")
+        if device_type:
+            node["device_type"] = device_type
+        # Nombre a mostrar en el mapa: hostname > fabricante > tipo > (la IP).
+        nombre = hostname or vendor or device_type
         if nombre:
             node["device_name"] = nombre
     return graph

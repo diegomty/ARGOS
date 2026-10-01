@@ -317,6 +317,7 @@ function showPanel(n) {
     + `</div>`
     + `<div class="mp-meta">`
     +   `<span><i>rol</i> ${n.role}</span>`
+    +   (n.device_type ? `<span><i>tipo</i> ${n.device_type}</span>` : '')
     +   (n.vendor ? `<span><i>fabricante</i> ${n.vendor}</span>` : '')
     +   (n.hostname ? `<span><i>hostname</i> ${n.hostname}</span>` : '')
     +   (n.mac ? `<span><i>mac</i> ${n.mac}</span>` : '')

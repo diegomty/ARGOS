@@ -34,7 +34,7 @@ import socket
 import subprocess
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 _IS_WINDOWS = platform.system() == "Windows"
 
@@ -122,22 +122,26 @@ def _looks_like_ip(s: str) -> bool:
 # --------------------------------------------------------------------------- #
 
 def _fw_block(ip: str) -> Tuple[bool, str, str]:
-    """Bloquea `ip` en el firewall local. Devuelve (ok, comando, salida)."""
+    """Bloquea `ip` en el firewall local (idempotente). Devuelve (ok, comando, salida)."""
     if _IS_WINDOWS:
         name = f"{_RULE_PREFIX}{ip}"
+        # netsh 'add rule' NO es idempotente: crea otra regla con el mismo nombre
+        # cada vez. Borramos primero cualquier regla previa para no apilar duplicados.
+        _run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={name}"])
         cmd = ["netsh", "advfirewall", "firewall", "add", "rule",
                f"name={name}", "dir=in", "action=block", f"remoteip={ip}"]
         ok, out = _run(cmd)
         return ok, " ".join(cmd), out
     # Linux/Kali: caída de tráfico entrante Y reenviado (por si ARGOS rutea).
-    cmds = [["iptables", "-I", "INPUT", "-s", ip, "-j", "DROP"],
-            ["iptables", "-I", "FORWARD", "-s", ip, "-j", "DROP"]]
+    # `-C` comprueba si la regla ya existe; solo se inserta si falta (idempotente).
     ok_all, outs = True, []
-    for c in cmds:
-        ok, out = _run(c)
-        ok_all = ok_all and ok
-        outs.append(f"$ {' '.join(c)}\n{out}".rstrip())
-    return ok_all, " ; ".join(" ".join(c) for c in cmds), "\n".join(outs)
+    for chain in ("INPUT", "FORWARD"):
+        existe, _o = _run(["iptables", "-C", chain, "-s", ip, "-j", "DROP"])
+        if not existe:
+            ok, out = _run(["iptables", "-I", chain, "-s", ip, "-j", "DROP"])
+            ok_all = ok_all and ok
+            outs.append(out)
+    return ok_all, f"iptables -I INPUT/FORWARD -s {ip} -j DROP", "\n".join(outs)
 
 
 def _fw_unblock(ip: str) -> Tuple[bool, str, str]:
@@ -180,6 +184,10 @@ class SoarEngine:
         self._auto_blocks = 0                      # contadores para stats()
         self._manual_blocks = 0
         self._skipped = 0
+        # Callback opcional (ip, active): lo usa el server para avisarle al
+        # sensor que ignore/vuelva a vigilar una IP al bloquearla/desbloquearla,
+        # así un atacante bloqueado deja de cargar el sensor.
+        self.on_block_change: Optional[Callable[[str, bool], None]] = None
 
         # --- Lista blanca dura ---
         self._allow_ips: set[str] = set(_own_ips()) | set(_default_gateways())
@@ -243,7 +251,10 @@ class SoarEngine:
         now = time.time()
         with self._lock:
             prev = self._blocked.get(ip)
-            if prev and prev.get("active") and (now - prev["ts"]) < self.cooldown:
+            # Ya bloqueada y activa: NO se re-aplica el firewall (evita apilar
+            # reglas y trabajo inútil ante un flood que sigue tocando). Solo se
+            # re-bloquea si antes se había levantado el bloqueo.
+            if prev and prev.get("active"):
                 return {**prev, "ip": ip, "deduped": True}
 
         ok, command, output = _fw_block(ip)
@@ -256,6 +267,8 @@ class SoarEngine:
                     self._auto_blocks += 1
                 else:
                     self._manual_blocks += 1
+        if ok:
+            self._notify_block(ip, True)   # el sensor deja de procesar esta IP
         estado = "OK" if ok else "FALLÓ (¿sin privilegios?)"
         print(f"[soar] bloqueo {actor} de {ip} — {estado}", flush=True)
         return rec
@@ -270,7 +283,19 @@ class SoarEngine:
                         "command": command, "output": output})
             self._blocked[ip] = rec
         print(f"[soar] desbloqueo de {ip} — {'OK' if ok else 'FALLÓ'}", flush=True)
+        self._notify_block(ip, False)      # el sensor vuelve a vigilar esta IP
         return {"ip": ip, "ok": ok, "command": command, "output": output, "ts": now}
+
+    def _notify_block(self, ip: str, active: bool) -> None:
+        """Notifica el cambio de estado de bloqueo (para que el sensor ignore o
+        vuelva a vigilar la IP). Best-effort: nunca rompe el flujo de respuesta."""
+        cb = self.on_block_change
+        if cb is None:
+            return
+        try:
+            cb(ip, active)
+        except Exception as e:
+            print(f"[soar] on_block_change error: {e}", flush=True)
 
     def on_detection(self, ip: str, reason: str, kind: str = "") -> dict:
         """Punto de entrada para el sensor/honeypot ante una amenaza.
