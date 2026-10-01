@@ -8,16 +8,35 @@ import paramiko
 from . import config
 
 
-def bloquear_ip_en_router(ip_objetivo: str, on_log=None) -> bool:
+def bloquear_ip_en_router(ip_objetivo: str, on_log=None,
+                          interface: Optional[str] = None) -> bool:
     """Aplica `deny ip host <ip>` en la BLACKLIST de la interfaz de bloqueo.
 
     Devuelve True si la sesión SSH terminó sin excepciones. `on_log` es un
     callback opcional para emitir cada línea de progreso (lo usa el dashboard
-    para mostrar el log de respuesta autónoma en tiempo real).
+    para mostrar el log de respuesta autónoma en tiempo real). `interface`
+    permite sobreescribir la interfaz donde se aplica la ACL (por defecto
+    `config.INTERFAZ_BLOQUEO`).
+
+    Construcción de la ACL — CRÍTICO para que el bloqueo funcione y no encierre
+    al operador (aprendido a la mala en el lab):
+
+      * `1 permit ip host <ARGOS> any`  → SALVAGUARDA: ARGOS siempre puede
+        alcanzar/administrar el router. Va PRIMERO, así ninguna edición
+        posterior puede dejar la interfaz en «deny-all» y cortarnos el SSH.
+      * `<n> deny ip host <atacante> any` → el bloqueo. Va ANTES del permit
+        general (una ACL se evalúa de arriba abajo; si el `permit any` queda
+        arriba, los `deny` son código muerto — ese era el bug).
+      * `65000 permit ip any any`        → catch-all SIEMPRE al final.
+
+    Se limpia cualquier `permit ip any any` mal ubicado antes de re-anclarlo
+    al fondo, de modo que la función es idempotente y segura aunque la ACL
+    venga de un estado previo roto.
     """
     if not ip_objetivo:
         return False
 
+    iface = interface or config.INTERFAZ_BLOQUEO
     log = on_log or (lambda _: None)
     log(f"[!] INICIANDO CONTRAMEDIDA: bloqueando {ip_objetivo}")
 
@@ -43,9 +62,11 @@ def bloquear_ip_en_router(ip_objetivo: str, on_log=None) -> bool:
             "terminal length 0",
             "conf t",
             "ip access-list extended BLACKLIST",
-            f"deny ip host {ip_objetivo} any",
-            "permit ip any any",
-            f"interface {config.INTERFAZ_BLOQUEO}",
+            f"1 permit ip host {config.MI_PC_IP} any",  # salvaguarda anti-encierro (va 1º)
+            "no permit ip any any",                      # limpia catch-all mal ubicado
+            f"deny ip host {ip_objetivo} any",           # el bloqueo (queda sobre el catch-all)
+            "65000 permit ip any any",                   # catch-all SIEMPRE al final
+            f"interface {iface}",
             "ip access-group BLACKLIST in",
             "end",
             "write memory",
@@ -69,6 +90,27 @@ def bloquear_ip_en_router(ip_objetivo: str, on_log=None) -> bool:
         ssh.close()
 
     return exito
+
+
+def desbloquear_ip_en_router(ip_objetivo: str, on_log=None) -> bool:
+    """Reverso de `bloquear_ip_en_router`: quita el `deny ip host <ip>` de la
+    BLACKLIST. La salvaguarda y el catch-all se conservan intactos.
+    """
+    if not ip_objetivo:
+        return False
+    log = on_log or (lambda _: None)
+    log(f"[!] LEVANTANDO BLOQUEO de {ip_objetivo}")
+    comandos = [
+        "conf t",
+        "ip access-list extended BLACKLIST",
+        f"no deny ip host {ip_objetivo} any",
+        "end",
+        "write memory",
+    ]
+    ok = _ejecutar_comandos_router(comandos, log)
+    if ok:
+        log(f"[OK] {ip_objetivo} desbloqueado")
+    return ok
 
 
 def _ejecutar_comandos_router(comandos: List[str], on_log) -> bool:
