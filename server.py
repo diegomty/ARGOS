@@ -34,6 +34,7 @@ from core.analysis import hash_sha3
 from core.events import SentinelEvent
 from core.flowlistener import FlowListener
 from core.honeypot import HoneypotListener, DEFAULT_DECOYS
+from core.hostmonitor import HostMonitor, scan_ports
 from core.soar import SoarEngine
 from core.storage import Storage
 from core.topology import Topology
@@ -61,6 +62,10 @@ if os.getenv("SOAR_MODE", "").strip().lower() == "auto":
         soar.set_mode("auto")
     except ValueError:
         pass
+
+# Monitoreo ACTIVO de hosts (vista Hosts, estilo Checkmk): el operador agrega
+# IPs a mano y ARGOS las sondea por ping (sin admin, sin elegir interfaz).
+host_monitor = HostMonitor(storage)
 
 
 # Topología cargada una sola vez al startup. Si falla la carga, el
@@ -174,6 +179,7 @@ except Exception as e:
 _flow_listener: Optional[FlowListener] = None
 _honeypot: Optional[HoneypotListener] = None
 _sensor = None
+_sensor_iface: Optional[str] = None   # interfaz que el sensor está capturando
 # El sensor de captura pasiva es OPT-IN porque requiere admin: se activa
 # arrancando el servidor con la variable de entorno Q_SENTINEL_SENSOR=1.
 SENSOR_ENABLED = os.getenv("Q_SENTINEL_SENSOR", "0") == "1"
@@ -246,7 +252,7 @@ def _arrancar_flow_listener(loop: asyncio.AbstractEventLoop) -> Optional[FlowLis
     return listener
 
 
-def _arrancar_sensor(loop: asyncio.AbstractEventLoop):
+def _arrancar_sensor(loop: asyncio.AbstractEventLoop, iface: Optional[str] = None):
     """Sensor de captura pasiva (OPT-IN). Alimenta el pipeline con los flujos
     REALES de la red del host — así el Mapa y el detector dejan de depender de
     que un router exporte NetFlow.
@@ -299,7 +305,7 @@ def _arrancar_sensor(loop: asyncio.AbstractEventLoop):
 
     try:
         from core.sensor import PassiveSensor  # import perezoso (scapy)
-        sensor = PassiveSensor(iface=SENSOR_IFACE)
+        sensor = PassiveSensor(iface=iface)
         sensor.start(lambda flow: _handle_flow(flow, loop),
                      on_identity=_on_identity, on_alert=_on_alert)
         # Al bloquear/desbloquear una IP, el SOAR le avisa al sensor para que
@@ -308,7 +314,7 @@ def _arrancar_sensor(loop: asyncio.AbstractEventLoop):
         soar.on_block_change = lambda ip, active: (
             sensor.ignore_source(ip) if active else sensor.unignore_source(ip))
         print(f"[server] sensor de captura pasiva arrancado "
-              f"(iface={SENSOR_IFACE or 'default'})", flush=True)
+              f"(iface={iface or 'default'})", flush=True)
         return sensor
     except Exception as e:
         print(f"[sensor] no se pudo iniciar (¿admin? ¿Npcap? ¿scapy?): {e}", flush=True)
@@ -412,16 +418,19 @@ async def _ml_retrain_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _flow_listener, _honeypot, _sensor
+    global _flow_listener, _honeypot, _sensor, _sensor_iface
     loop = asyncio.get_running_loop()
     _arrancar_listener(loop)
     _flow_listener = _arrancar_flow_listener(loop)
     _honeypot = _arrancar_honeypot(loop)
     if SENSOR_ENABLED:
-        _sensor = _arrancar_sensor(loop)
+        _sensor = _arrancar_sensor(loop, SENSOR_IFACE)
+        _sensor_iface = SENSOR_IFACE
+    host_monitor.start()
     retrain_task = asyncio.create_task(_ml_retrain_loop())
     yield
     retrain_task.cancel()
+    host_monitor.stop()
     if _flow_listener is not None:
         _flow_listener.stop()
     if _honeypot is not None:
@@ -659,6 +668,131 @@ async def soar_unblock(req: dict) -> JSONResponse:
         return JSONResponse({"error": "ip requerida"}, status_code=400)
     rec = await asyncio.to_thread(soar.unblock, ip)
     return JSONResponse(rec, status_code=200 if rec.get("ok") else 502)
+
+
+# --- Monitoreo activo de hosts (vista Hosts, estilo Checkmk) ---
+
+def _valid_ip(ip: str) -> bool:
+    import ipaddress
+    try:
+        ipaddress.ip_address(ip)
+        return True
+    except ValueError:
+        return False
+
+
+@app.get("/api/hosts")
+async def hosts_list() -> JSONResponse:
+    """Hosts monitoreados con su último estado (UP/DOWN + latencia)."""
+    return JSONResponse({"hosts": host_monitor.list()})
+
+
+@app.post("/api/hosts")
+async def hosts_add(req: dict) -> JSONResponse:
+    """Agrega un host a monitorear por ping. Body: {ip, label?}."""
+    ip = (req or {}).get("ip", "").strip()
+    if not _valid_ip(ip):
+        return JSONResponse({"error": "IP inválida"}, status_code=400)
+    label = (req or {}).get("label") or None
+    state = await asyncio.to_thread(host_monitor.add, ip, label)
+    return JSONResponse({"ip": ip, "label": label, **state})
+
+
+@app.delete("/api/hosts/{ip}")
+async def hosts_remove(ip: str) -> JSONResponse:
+    host_monitor.remove(ip)
+    return JSONResponse({"removed": ip})
+
+
+@app.get("/api/hosts/{ip}/history")
+async def hosts_history(ip: str, since: Optional[float] = None, limit: int = 500) -> JSONResponse:
+    rows = host_monitor.history(ip, since=since, limit=limit)
+    return JSONResponse({"ip": ip, "samples": rows})
+
+
+@app.post("/api/hosts/{ip}/ping")
+async def hosts_ping(ip: str) -> JSONResponse:
+    """Sondeo inmediato (ping) de un host."""
+    if not _valid_ip(ip):
+        return JSONResponse({"error": "IP inválida"}, status_code=400)
+    state = await asyncio.to_thread(host_monitor.probe_now, ip)
+    return JSONResponse({"ip": ip, **state})
+
+
+@app.post("/api/hosts/{ip}/portscan")
+async def hosts_portscan(ip: str) -> JSONResponse:
+    """Escaneo TCP de puertos comunes a demanda — qué servicios responden."""
+    if not _valid_ip(ip):
+        return JSONResponse({"error": "IP inválida"}, status_code=400)
+    abiertos = await asyncio.to_thread(host_monitor.scan, ip)
+    return JSONResponse({"ip": ip, "open_ports": abiertos})
+
+
+@app.get("/api/hosts/{ip}/services")
+async def hosts_services(ip: str) -> JSONResponse:
+    """Checks del host estilo Checkmk (PING, latencia, puertos, identidad)."""
+    if not _valid_ip(ip):
+        return JSONResponse({"error": "IP inválida"}, status_code=400)
+    return JSONResponse(await asyncio.to_thread(host_monitor.services, ip))
+
+
+# --- Sensor pasivo: elegir interfaz y arrancar/parar desde la UI ---
+
+@app.get("/api/interfaces")
+async def interfaces_list() -> JSONResponse:
+    """Interfaces de red disponibles para capturar (para el selector de la UI)."""
+    from core.sensor import list_interfaces
+    return JSONResponse({"interfaces": await asyncio.to_thread(list_interfaces)})
+
+
+@app.get("/api/sensor")
+async def sensor_status() -> JSONResponse:
+    """Estado del sensor pasivo: si corre, en qué interfaz, y si hay privilegios."""
+    running = _sensor is not None
+    stats = {}
+    if running:
+        try:
+            stats = _sensor.stats()
+        except Exception:
+            pass
+    return JSONResponse({"running": running, "iface": _sensor_iface,
+                         "privileged": soar.privileged, "stats": stats})
+
+
+@app.post("/api/sensor/start")
+async def sensor_start(req: dict) -> JSONResponse:
+    """Arranca (o reinicia) el sensor pasivo en la interfaz elegida."""
+    global _sensor, _sensor_iface
+    iface = (req or {}).get("iface") or None
+    loop = asyncio.get_running_loop()
+    if _sensor is not None:
+        try:
+            _sensor.stop()
+        except Exception:
+            pass
+        _sensor = None
+    _sensor = await asyncio.to_thread(_arrancar_sensor, loop, iface)
+    if _sensor is None:
+        return JSONResponse(
+            {"running": False, "error": "no se pudo iniciar — ¿el servidor corre "
+             "como administrador/root? ¿Npcap (Windows) o libpcap (Linux) instalado?"},
+            status_code=500)
+    _sensor_iface = iface
+    return JSONResponse({"running": True, "iface": iface, "privileged": soar.privileged})
+
+
+@app.post("/api/sensor/stop")
+async def sensor_stop() -> JSONResponse:
+    """Detiene el sensor pasivo."""
+    global _sensor, _sensor_iface
+    if _sensor is not None:
+        try:
+            _sensor.stop()
+        except Exception:
+            pass
+        _sensor = None
+    _sensor_iface = None
+    return JSONResponse({"running": False})
 
 
 @app.get("/api/discovery")

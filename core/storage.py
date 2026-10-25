@@ -88,6 +88,24 @@ CREATE TABLE IF NOT EXISTS identities (
     source      TEXT,                -- 'dhcp' | 'mdns' | 'dns' | 'arp' | 'ssdp'
     updated_at  REAL NOT NULL
 );
+
+-- Hosts monitoreados ACTIVAMENTE (estilo Checkmk): el operador los agrega a mano
+-- y ARGOS los sondea por ping (y puertos a demanda). No requiere admin.
+CREATE TABLE IF NOT EXISTS monitored_hosts (
+    ip        TEXT PRIMARY KEY,
+    label     TEXT,
+    added_at  REAL NOT NULL,
+    enabled   INTEGER NOT NULL DEFAULT 1
+);
+-- Muestras de sondeo por host (disponibilidad + latencia) para graficar.
+CREATE TABLE IF NOT EXISTS host_samples (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    ip      TEXT  NOT NULL,
+    ts      REAL  NOT NULL,
+    up      INTEGER NOT NULL,
+    rtt_ms  REAL
+);
+CREATE INDEX IF NOT EXISTS idx_hsamples ON host_samples(ip, ts);
 """
 
 
@@ -350,6 +368,57 @@ class Storage:
                 "SELECT ip, mac, hostname, vendor, device_type, source, updated_at FROM identities"
             ).fetchall()
             return {r["ip"]: dict(r) for r in rows}
+
+    # ---- Hosts monitoreados activamente (vista Hosts) ----
+
+    def add_monitored_host(self, ip: str, label: Optional[str] = None) -> None:
+        with self._lock, closing(self._connect()) as c:
+            c.execute(
+                """INSERT INTO monitored_hosts (ip, label, added_at, enabled)
+                   VALUES (?, ?, ?, 1)
+                   ON CONFLICT(ip) DO UPDATE SET label = COALESCE(excluded.label, monitored_hosts.label)""",
+                (ip, label, time.time()),
+            )
+
+    def remove_monitored_host(self, ip: str) -> None:
+        with self._lock, closing(self._connect()) as c:
+            c.execute("DELETE FROM monitored_hosts WHERE ip = ?", (ip,))
+            c.execute("DELETE FROM host_samples WHERE ip = ?", (ip,))
+
+    def list_monitored_hosts(self) -> List[Dict[str, Any]]:
+        with self._lock, closing(self._connect()) as c:
+            rows = c.execute(
+                "SELECT ip, label, added_at, enabled FROM monitored_hosts ORDER BY added_at"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def save_host_sample(self, ip: str, up: bool, rtt_ms: Optional[float]) -> None:
+        with self._lock, closing(self._connect()) as c:
+            c.execute(
+                "INSERT INTO host_samples (ip, ts, up, rtt_ms) VALUES (?, ?, ?, ?)",
+                (ip, time.time(), 1 if up else 0, rtt_ms),
+            )
+
+    def query_host_samples(self, ip: str, since: Optional[float] = None,
+                           limit: int = 500) -> List[Dict[str, Any]]:
+        clauses = ["ip = ?"]
+        params: List[Any] = [ip]
+        if since is not None:
+            clauses.append("ts >= ?")
+            params.append(since)
+        params.append(max(1, min(int(limit), 5000)))
+        with self._lock, closing(self._connect()) as c:
+            rows = c.execute(
+                f"SELECT ts, up, rtt_ms FROM host_samples WHERE {' AND '.join(clauses)} "
+                f"ORDER BY ts DESC LIMIT ?",
+                params,
+            ).fetchall()
+            return [dict(r) for r in reversed(rows)]
+
+    def prune_host_samples(self, max_age_s: float = 86400) -> None:
+        """Poda muestras viejas para que la tabla no crezca sin límite."""
+        with self._lock, closing(self._connect()) as c:
+            c.execute("DELETE FROM host_samples WHERE ts < ?", (time.time() - max_age_s,))
 
     def query_isolation_log(self, since: Optional[float] = None, limit: int = 100) -> List[Dict[str, Any]]:
         clauses: List[str] = []

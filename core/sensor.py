@@ -50,6 +50,49 @@ UPNP_DEVICE_TIPOS: Dict[str, str] = {
     "basic": "Dispositivo UPnP",
 }
 _SSDP_DEVICE_RE = re.compile(r":device:([A-Za-z0-9_]+):", re.IGNORECASE)
+
+
+def list_interfaces() -> list:
+    """Lista las interfaces de red disponibles para capturar — para que el
+    usuario elija el segmento a monitorear desde la UI (sin saber nombres).
+    Devuelve [{name, description, ips}]. Robusto: nunca lanza.
+    """
+    import platform
+    out = []
+
+    def _clean(ips):
+        # Quita loopback y APIPA (169.254.x): ruido que no sirve para monitorear.
+        return [x for x in ips if not str(x).startswith(("127.", "169.254."))]
+
+    try:
+        if platform.system() == "Windows":
+            from scapy.arch.windows import get_windows_if_list
+            for i in get_windows_if_list():
+                name = i.get("name") or ""
+                if "NPCAP" in name.upper():
+                    continue  # evita los duplicados "-Npcap Packet Driver"
+                ips = _clean([str(x) for x in i.get("ips", []) if ":" not in str(x)])
+                # Si TENÍA IPs pero todas eran ruido (APIPA), la omitimos.
+                raw = [str(x) for x in i.get("ips", []) if ":" not in str(x)]
+                if raw and not ips:
+                    continue
+                out.append({"name": name, "description": i.get("description", ""), "ips": ips})
+        else:
+            from scapy.all import get_if_list, get_if_addr
+            for name in get_if_list():
+                if name == "lo":
+                    continue
+                ips = []
+                try:
+                    ip = get_if_addr(name)
+                    if ip and ip not in ("0.0.0.0",) and not str(ip).startswith(("127.", "169.254.")):
+                        ips = [ip]
+                except Exception:
+                    pass
+                out.append({"name": name, "description": "", "ips": ips})
+    except Exception as e:
+        out = [{"name": "", "description": f"error listando interfaces: {e}", "ips": []}]
+    return out
 # on_alert(alert_dict): se detectó un ataque por TASA (p. ej. un flood DoS).
 AlertCallback = Callable[[Dict[str, Any]], None]
 
