@@ -11,6 +11,13 @@ const POLL_MS = 5000;
 const BUCKET_S = 60;
 const SHOW_BUCKETS = 30;  // últimos 30 min
 
+// Lee un color del tema actual (variables CSS) con respaldo, para que la
+// gráfica se vea bien en claro y oscuro.
+function cv(name, fallback) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+
 export class TimeseriesChart {
   constructor(container) {
     this.container = container;
@@ -22,6 +29,7 @@ export class TimeseriesChart {
     container.appendChild(this.svg);
     this._timer = null;
     window.addEventListener('resize', () => this._lastPoints && this.render(this._lastPoints));
+    document.addEventListener('argos:themechange', () => this._lastPoints && this.render(this._lastPoints));
   }
 
   start() {
@@ -62,7 +70,7 @@ export class TimeseriesChart {
       this.svg.appendChild(el('text', {
         x: W / 2, y: H / 2,
         'text-anchor': 'middle', 'dominant-baseline': 'middle',
-        fill: '#6c7a99', 'font-size': 11,
+        fill: cv('--muted', '#6c7a99'), 'font-size': 11,
         'font-family': 'ui-monospace, monospace',
       }, '— sin datos en los últimos 30 minutos —'));
       return;
@@ -88,11 +96,11 @@ export class TimeseriesChart {
       const y = ys(yv);
       this.svg.appendChild(el('line', {
         x1: PAD.left, x2: W - PAD.right, y1: y, y2: y,
-        stroke: '#1f2a44', 'stroke-width': 1, opacity: yv === 5 ? 0 : 0.6,
+        stroke: cv('--border', '#1f2a44'), 'stroke-width': 1, opacity: yv === 5 ? 0 : 0.6,
       }));
       this.svg.appendChild(el('text', {
         x: PAD.left - 4, y: y + 3, 'text-anchor': 'end',
-        fill: '#6c7a99', 'font-size': 9,
+        fill: cv('--muted', '#6c7a99'), 'font-size': 9,
         'font-family': 'ui-monospace, monospace',
       }, yv.toFixed(1)));
     }
@@ -101,7 +109,7 @@ export class TimeseriesChart {
     const thY = ys(5);
     this.svg.appendChild(el('line', {
       x1: PAD.left, x2: W - PAD.right, y1: thY, y2: thY,
-      stroke: '#f5c14b', 'stroke-width': 1, 'stroke-dasharray': '3 4', opacity: 0.6,
+      stroke: cv('--amber', '#f5c14b'), 'stroke-width': 1, 'stroke-dasharray': '3 4', opacity: 0.6,
     }));
 
     // --- Área + línea de avg_h ---
@@ -122,7 +130,7 @@ export class TimeseriesChart {
       const baseline = ys(0);
       d += ` L${pts[pts.length-1].x},${baseline} L${pts[0].x},${baseline} Z`;
       this.svg.appendChild(el('path', {
-        d, fill: 'rgba(94, 224, 214, 0.18)', stroke: 'none',
+        d, fill: cv('--cyan', '#5ee0d6') + '2e', stroke: 'none',
       }));
 
       // Línea (avg)
@@ -131,7 +139,7 @@ export class TimeseriesChart {
         ld += (i === 0 ? 'M' : 'L') + pts[i].x + ',' + pts[i].y;
       }
       this.svg.appendChild(el('path', {
-        d: ld, fill: 'none', stroke: '#5ee0d6', 'stroke-width': 1.5,
+        d: ld, fill: 'none', stroke: cv('--cyan', '#5ee0d6'), 'stroke-width': 1.5,
       }));
 
       // Marcadores de max_h cuando supera el umbral (cresta)
@@ -140,7 +148,7 @@ export class TimeseriesChart {
           this.svg.appendChild(el('circle', {
             cx: p.x, cy: p.max,
             r: 3 + Math.min(p.anomaly, 8) * 0.5,
-            fill: '#ff4d6d', opacity: 0.9,
+            fill: cv('--red', '#ff4d6d'), opacity: 0.9,
           }));
         }
       }
@@ -153,14 +161,14 @@ export class TimeseriesChart {
       const x = xs(t);
       this.svg.appendChild(el('line', {
         x1: x, x2: x, y1: H - PAD.bottom - 2, y2: H - PAD.bottom + 2,
-        stroke: '#6c7a99', 'stroke-width': 1, opacity: 0.5,
+        stroke: cv('--muted', '#6c7a99'), 'stroke-width': 1, opacity: 0.5,
       }));
       const date = new Date(t * 1000);
       const hh = String(date.getHours()).padStart(2, '0');
       const mm = String(date.getMinutes()).padStart(2, '0');
       this.svg.appendChild(el('text', {
         x: x, y: H - 3, 'text-anchor': 'middle',
-        fill: '#6c7a99', 'font-size': 9,
+        fill: cv('--muted', '#6c7a99'), 'font-size': 9,
         'font-family': 'ui-monospace, monospace',
       }, `${hh}:${mm}`));
     }

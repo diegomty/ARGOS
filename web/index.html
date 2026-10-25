@@ -4,6 +4,15 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ARGOS NDR · Monitoreo Autónomo de Seguridad</title>
+    <!-- Aplica el tema guardado ANTES de pintar (evita parpadeo). Claro = sin atributo. -->
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem('argos_theme');
+          if (t && t !== 'light') document.documentElement.setAttribute('data-theme', t);
+        } catch (e) {}
+      })();
+    </script>
     <link rel="stylesheet" href="/style.css" />
     <script type="importmap">
       {
@@ -29,24 +38,39 @@
 
     <div class="workspace">
       <nav class="rail">
-        <button class="rail-item active" data-view="centinela" title="Red · topología en vivo autodescubierta">
-          <span class="rail-ico">◈</span><span class="rail-txt">Red</span>
+        <!-- INICIO: centro de operaciones (landing) -->
+        <span class="rail-group">Inicio</span>
+        <button class="rail-item active" data-view="inicio" title="Centro de operaciones · resumen y ML">
+          <span class="rail-ico">⬢</span><span class="rail-txt">Inicio</span>
+        </button>
+
+        <!-- DETECCIÓN: el corazón del producto (ML sobre los flujos) -->
+        <span class="rail-group">Detección</span>
+        <button class="rail-item" data-view="anomalias" title="Anomalías detectadas por el ML">
+          <span class="rail-ico">△</span><span class="rail-txt">Anomalías</span>
+        </button>
+        <button class="rail-item" data-view="flujos" title="Flujos NetFlow en vivo (evidencia cruda)">
+          <span class="rail-ico">⇄</span><span class="rail-txt">Flujos</span>
+        </button>
+
+        <!-- RED Y ACTIVOS: topología + inventario + monitoreo de hosts -->
+        <span class="rail-group">Red</span>
+        <button class="rail-item" data-view="centinela" title="Red · topología en vivo autodescubierta">
+          <span class="rail-ico">◈</span><span class="rail-txt">Mapa</span>
         </button>
         <button class="rail-item" data-view="inventario" title="Inventario de dispositivos · activos de la red">
           <span class="rail-ico">▦</span><span class="rail-txt">Inventario</span>
         </button>
-        <button class="rail-item" data-view="flujos" title="Flujos NetFlow en vivo">
-          <span class="rail-ico">⇄</span><span class="rail-txt">Flujos</span>
+        <button class="rail-item" data-view="hosts" title="Hosts · monitoreo activo (ping/puertos)">
+          <span class="rail-ico">◉</span><span class="rail-txt">Hosts</span>
         </button>
-        <button class="rail-item" data-view="anomalias" title="Anomalías detectadas">
-          <span class="rail-ico">△</span><span class="rail-txt">Anomalías</span>
-        </button>
-        <button class="rail-item" data-view="honeypot" title="Honeypot · señuelos de intrusión">
-          <span class="rail-ico">✷</span><span class="rail-txt">Honeypot</span>
-        </button>
+
+        <!-- RESPUESTA: contención (SOAR) -->
+        <span class="rail-group">Respuesta</span>
         <button class="rail-item" data-view="soar" title="SOAR · respuesta automática (bloqueo de IPs)">
           <span class="rail-ico">⊘</span><span class="rail-txt">SOAR</span>
         </button>
+
         <span class="rail-spacer"></span>
         <button class="rail-item" data-view="config" title="Configuración y estado">
           <span class="rail-ico">⚙</span><span class="rail-txt">Config</span>
@@ -54,7 +78,63 @@
       </nav>
 
       <div class="viewport">
-        <section class="view view-centinela active" data-view="centinela">
+        <!-- INICIO · Centro de operaciones (landing) -->
+        <section class="view view-inicio active" data-view="inicio">
+          <div class="home">
+            <div class="home-head">
+              <span class="map-title"><span class="key">⬢</span>Centro de operaciones</span>
+              <span class="map-hint" id="home-status">—</span>
+            </div>
+
+            <!-- Sistema inmune: los 2 modelos de ML -->
+            <div class="home-sec-title">Sistema inmune · Machine Learning</div>
+            <div class="home-models">
+              <div class="model-card">
+                <div class="model-top">
+                  <span class="model-name">Inmunidad heredada</span>
+                  <span class="model-dot" id="mi-dot"></span>
+                </div>
+                <div class="model-algo">RandomForest · dataset CICIDS2017</div>
+                <div class="model-desc">Reconoce patrones de ataques ya conocidos (memoria heredada).</div>
+                <div class="model-state" id="mi-state">consultando…</div>
+                <div class="model-metrics" title="Métricas de validación sobre CICIDS2017">
+                  <div><b>98%</b><span>recall</span></div>
+                  <div><b>95.9%</b><span>precisión</span></div>
+                  <div><b>97%</b><span>F1</span></div>
+                </div>
+              </div>
+              <div class="model-card">
+                <div class="model-top">
+                  <span class="model-name">Inmunidad adquirida</span>
+                  <span class="model-dot" id="ml-dot"></span>
+                </div>
+                <div class="model-algo">Isolation Forest · tu red (ventana 7 días)</div>
+                <div class="model-desc">Aprende la línea base de ESTA red y detecta desvíos.</div>
+                <div class="model-state" id="ml-state">consultando…</div>
+                <div class="model-progress"><div class="model-bar" id="ml-bar"></div></div>
+                <div class="model-prog-lbl" id="ml-prog-lbl">—</div>
+                <button class="btn-action tbl-act" id="home-retrain">Re-entrenar ahora</button>
+                <span class="config-msg ok" id="home-retrain-msg"></span>
+              </div>
+            </div>
+
+            <!-- KPIs en vivo -->
+            <div class="home-kpis">
+              <div class="home-kpi"><div class="hk-num" id="kpi-eval">0</div><div class="hk-lbl">flujos evaluados por ML</div></div>
+              <div class="home-kpi"><div class="hk-num" id="kpi-flagged">0</div><div class="hk-lbl">marcados como anómalos</div></div>
+              <div class="home-kpi"><div class="hk-num" id="kpi-hosts">0</div><div class="hk-lbl">hosts activos (UP / total)</div></div>
+              <div class="home-kpi"><div class="hk-num" id="kpi-net">0</div><div class="hk-lbl">nodos · relaciones</div></div>
+            </div>
+
+            <!-- Feed de amenazas en vivo -->
+            <div class="home-sec-title">Amenazas en vivo <span class="home-sec-hint" id="home-feed-hint"></span></div>
+            <div class="home-feed" id="home-feed">
+              <div class="home-feed-empty" id="home-feed-empty">Sin amenazas por ahora — el sistema está en calma</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="view view-centinela" data-view="centinela">
 
     <section class="kpi-band">
       <div class="kpi-group">
@@ -227,7 +307,7 @@
                 <thead><tr>
                   <th>Hora</th><th>Origen</th><th>Destino</th><th>Servicio</th>
                   <th class="num">Paq.</th><th class="num">Bytes</th>
-                  <th class="num">Dur.</th><th>Detector ML</th>
+                  <th class="num">Dur.</th><th>Detección (ML)</th>
                 </tr></thead>
                 <tbody id="flujos-body"></tbody>
               </table>
@@ -239,13 +319,13 @@
         <section class="view view-anomalias" data-view="anomalias">
           <div class="table-shell">
             <div class="table-header">
-              <span class="map-title"><span class="key">△</span>Anomalías · detección en vivo</span>
+              <span class="map-title"><span class="key">△</span>Anomalías · detección con ML en vivo</span>
               <span class="map-hint" id="anom-status">—</span>
             </div>
             <div class="table-wrap">
               <table class="data-table">
                 <thead><tr>
-                  <th>Hora</th><th>Tipo</th><th>Origen</th><th>Detalle</th><th>Detector / Plan</th>
+                  <th>Hora</th><th>Tipo</th><th>Origen</th><th>Detalle</th><th>Detección (ML)</th><th>Acción</th>
                 </tr></thead>
                 <tbody id="anom-body"></tbody>
               </table>
@@ -254,36 +334,95 @@
           </div>
         </section>
 
-        <section class="view view-honeypot" data-view="honeypot">
-          <div class="config-shell">
+        <section class="view view-hosts" data-view="hosts">
+          <!-- PANEL 1: lista de hosts (All hosts) -->
+          <div class="config-shell" id="hosts-list-panel">
             <div class="table-header">
-              <span class="map-title"><span class="key">✷</span>Honeypot · señuelos de intrusión</span>
-              <span class="map-hint" id="hp-status">—</span>
+              <span class="map-title"><span class="key">◉</span>Host activos</span>
+              <span class="map-hint" id="hosts-status">—</span>
             </div>
             <div class="config-body">
               <div class="config-card">
-                <div class="config-card-title">Estado</div>
-                <div class="config-rows" id="hp-state">cargando…</div>
-                <div class="config-actions">
-                  <button id="hp-toggle" class="btn-action btn-isolate">Activar / Desactivar</button>
-                  <button id="hp-test" class="btn-action btn-reactivate">Probar señuelo</button>
-                  <div class="config-msg" id="hp-msg"></div>
+                <div class="config-card-title">Agregar host</div>
+                <div class="config-inline">
+                  <input type="text" id="host-ip" placeholder="IP (p. ej. 192.168.0.1)" />
+                  <input type="text" id="host-label" placeholder="Nombre (opcional)" />
+                  <button id="host-add" class="btn-action btn-reactivate">Agregar</button>
                 </div>
+                <div class="config-hint">Sondeo por <b>ping</b> (no requiere admin). Pasa el cursor sobre OK/Wa/Un/Cr/Pd para ver qué significan.</div>
+                <div class="config-msg" id="hosts-msg"></div>
               </div>
               <div class="config-card">
-                <div class="config-card-title">Señuelos (puertos trampa)</div>
-                <div class="config-rows" id="hp-ports"></div>
-                <div class="config-hint">Cualquier conexión a estos puertos es sospechosa por definición: nadie legítimo toca un servicio falso.</div>
-              </div>
-              <div class="config-card">
-                <div class="config-card-title">Hits recientes · conexiones a señuelos</div>
+                <div class="config-card-title">Hosts monitoreados — clic en un host para ver sus servicios</div>
                 <div class="table-wrap">
                   <table class="data-table">
-                    <thead><tr><th>Hora</th><th>Origen</th><th>Señuelo</th><th>Datos capturados</th></tr></thead>
-                    <tbody id="hp-hits"></tbody>
+                    <thead><tr>
+                      <th title="State: estado del host (accesible por ping)">State</th>
+                      <th>Host</th>
+                      <th class="num" title="OK: servicios correctos">OK</th>
+                      <th class="num" title="Warning: advertencias (p. ej. latencia alta)">Wa</th>
+                      <th class="num" title="Unknown: estado desconocido / no determinado">Un</th>
+                      <th class="num" title="Critical: críticos (host caído, etc.)">Cr</th>
+                      <th class="num" title="Pending: pendientes del primer chequeo">Pd</th>
+                      <th></th>
+                    </tr></thead>
+                    <tbody id="hosts-body"></tbody>
                   </table>
-                  <div class="table-empty" id="hp-empty">— sin hits todavía · usa «Probar señuelo» o conéctate a un puerto trampa —</div>
+                  <div class="table-empty" id="hosts-empty">— agrega un host arriba para empezar —</div>
                 </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- PANEL 2: Services of host (detalle) -->
+          <div class="config-shell" id="hosts-detail-panel" hidden>
+            <div class="table-header">
+              <span class="map-title">
+                <button id="host-back" class="map-btn">← Host activos</button>
+                <span id="host-detail-title" style="margin-left:10px">Services of host</span>
+                <span id="host-spinner" class="host-spin" title="se actualiza cada 30 s"></span>
+              </span>
+              <div class="map-tools">
+                <!-- Menú Host ▾ (acciones del host actual, estilo Checkmk) -->
+                <div class="hmenu" id="hmenu-host">
+                  <button class="map-btn hmenu-btn" aria-haspopup="true" aria-expanded="false">Host ▾</button>
+                  <div class="hmenu-pop" hidden>
+                    <div class="hmenu-group">Monitoreo</div>
+                    <button class="hmenu-item" data-action="ping">Ping ahora</button>
+                    <button class="hmenu-item" data-action="scan">Escanear puertos (service discovery)</button>
+                    <button class="hmenu-item" data-action="refresh">Actualizar estado ahora</button>
+                    <div class="hmenu-group">Red</div>
+                    <button class="hmenu-item" data-action="map">Ver en el Mapa</button>
+                    <button class="hmenu-item" data-action="inv">Ver en Inventario</button>
+                    <div class="hmenu-group">Respuesta (SOAR)</div>
+                    <button class="hmenu-item" data-action="block">Bloquear en firewall</button>
+                    <button class="hmenu-item" data-action="unblock">Desbloquear</button>
+                    <div class="hmenu-group">Configuración</div>
+                    <button class="hmenu-item hmenu-danger" data-action="del">Quitar host</button>
+                  </div>
+                </div>
+                <!-- Menú Export ▾ (solo el host actual) -->
+                <div class="hmenu" id="hmenu-export">
+                  <button class="map-btn hmenu-btn" aria-haspopup="true" aria-expanded="false">Export ▾</button>
+                  <div class="hmenu-pop" hidden>
+                    <div class="hmenu-group">Datos del host actual</div>
+                    <button class="hmenu-item" data-action="csv">Exportar a CSV</button>
+                    <button class="hmenu-item" data-action="json">Exportar a JSON</button>
+                  </div>
+                </div>
+                <span class="map-hint" id="host-detail-msg"></span>
+              </div>
+            </div>
+            <div class="config-body">
+              <div class="config-card">
+                <div class="config-card-title">Servicios</div>
+                <div class="table-wrap">
+                  <table class="data-table">
+                    <thead><tr><th>Estado</th><th>Servicio</th><th>Resumen</th><th>Age</th><th>Checked</th></tr></thead>
+                    <tbody id="host-services"></tbody>
+                  </table>
+                </div>
+                <div id="host-chart"></div>
               </div>
             </div>
           </div>
@@ -339,17 +478,61 @@
             </div>
             <div class="config-body">
               <div class="config-card">
+                <div class="config-card-title">Apariencia · Tema</div>
+                <div class="config-field">
+                  <label>Tema de color de la consola</label>
+                  <div class="config-inline">
+                    <select id="cfg-theme" class="map-select">
+                      <option value="light">Claro (por defecto)</option>
+                      <option value="dark">Oscuro</option>
+                      <option value="ocean">Océano (azul)</option>
+                      <option value="nebula">Nebulosa (púrpura)</option>
+                    </select>
+                    <span class="theme-swatches" id="theme-swatches"></span>
+                  </div>
+                  <div class="config-hint">Se aplica al instante y se recuerda en este navegador.</div>
+                </div>
+              </div>
+              <div class="config-card">
+                <div class="config-card-title">Sensor pasivo · Interfaz a monitorear</div>
+                <div class="config-field">
+                  <label>Segmento (interfaz de red) a capturar</label>
+                  <div class="config-inline">
+                    <select id="cfg-iface" class="map-select"><option>cargando…</option></select>
+                    <button id="cfg-sensor-start" class="btn-action btn-reactivate">Iniciar</button>
+                    <button id="cfg-sensor-stop" class="btn-action btn-isolate">Detener</button>
+                  </div>
+                  <div class="config-rows" id="cfg-sensor-state"></div>
+                  <div class="config-hint">Capturar requiere ejecutar ARGOS como administrador/root (Npcap en Windows · libpcap en Linux). Elige la interfaz del segmento que quieras monitorear — sin env vars.</div>
+                  <div class="config-msg" id="cfg-sensor-msg"></div>
+                </div>
+              </div>
+              <div class="config-card">
+                <div class="config-card-title">Exportar datos (JSON)</div>
+                <div class="config-field">
+                  <div class="config-inline" style="flex-wrap:wrap">
+                    <button class="btn-action tbl-act" data-export="inventario">Inventario</button>
+                    <button class="btn-action tbl-act" data-export="flujos">Flujos</button>
+                    <button class="btn-action tbl-act" data-export="anomalias">Anomalías</button>
+                    <button class="btn-action tbl-act" data-export="mapa">Mapa</button>
+                    <button class="btn-action btn-reactivate tbl-act" data-export="todo">Todo</button>
+                  </div>
+                  <div class="config-hint">Descarga los datos actuales como archivo <code>.json</code>. Para exportar un host concreto (CSV/JSON), abre <b>Hosts → el host → Export</b>.</div>
+                  <div class="config-msg" id="cfg-export-msg"></div>
+                </div>
+              </div>
+              <div class="config-card">
                 <div class="config-card-title">Estado del sistema</div>
                 <div class="config-rows" id="config-status">cargando…</div>
               </div>
               <div class="config-card">
                 <div class="config-card-title">Acciones</div>
                 <div class="config-actions">
-                  <button id="cfg-retrain" class="btn-action btn-reactivate">Re-entrenar modelo local</button>
                   <button id="cfg-test-event" class="btn-action btn-reactivate">Inyectar evento de prueba</button>
                   <button id="cfg-test-flow" class="btn-action btn-isolate">Inyectar flujo anómalo</button>
                   <div class="config-msg" id="cfg-msg"></div>
                 </div>
+                <div class="config-hint">El estado de los modelos de ML y el re-entrenamiento están ahora en <b>Inicio</b>.</div>
               </div>
               <div class="config-card">
                 <div class="config-card-title">Ajustes del Mapa de Red</div>
@@ -412,11 +595,12 @@
 
     <script type="module" src="/js/main.js"></script>
     <script type="module" src="/js/console.js"></script>
+    <script type="module" src="/js/inicioview.js"></script>
     <script type="module" src="/js/mapview.js"></script>
     <script type="module" src="/js/inventoryview.js"></script>
+    <script type="module" src="/js/hostsview.js"></script>
     <script type="module" src="/js/flowsview.js"></script>
     <script type="module" src="/js/anomaliesview.js"></script>
-    <script type="module" src="/js/honeypotview.js"></script>
     <script type="module" src="/js/soarview.js"></script>
     <script type="module" src="/js/configview.js"></script>
   </body>

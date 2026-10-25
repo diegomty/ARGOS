@@ -35,6 +35,19 @@ const ROLE_COLOR = {
 };
 const CRIT_COLOR = { critical: '#ff4d6d', high: '#f5c14b', medium: '#60a5fa' };
 
+// Colores dependientes del tema: se leen de las variables CSS para que el mapa
+// se vea bien tanto en claro como en oscuro, y se refrescan al cambiar de tema.
+function readThemeColors() {
+  const cs = getComputedStyle(document.documentElement);
+  const g = (n, f) => (cs.getPropertyValue(n).trim() || f);
+  return {
+    text: g('--text', '#d6dee8'), muted: g('--muted', '#6c7a99'),
+    cyan: g('--cyan', '#5ee0d6'), red: g('--red', '#ff4d6d'),
+  };
+}
+let THEME = readThemeColors();
+document.addEventListener('argos:themechange', () => { THEME = readThemeColors(); });
+
 // --- Parámetros de la simulación (afinados para decenas de nodos) ---
 const REPULSION = 7000;
 const SPRING = 0.03;
@@ -54,6 +67,21 @@ let byId = new Map();
 let W = 0, H = 0, dpr = 1;
 let running = false, loaded = false, lastFetch = 0, raf = null;
 let hoverNode = null, dragNode = null;
+
+// Anomalías ML en vivo: marcamos la IP origen de cada flujo/evento anómalo con
+// una caducidad, para que el nodo pulse en rojo y "se enfríe" solo pasado un
+// rato. Así el Mapa cruza la detección del ML con la topología.
+const anomUntil = new Map();        // ip -> timestamp (ms) hasta cuándo resaltar
+const ANOM_TTL = 120000;            // 2 min desde la última anomalía
+function markAnomaly(ip) { if (ip) anomUntil.set(ip, Date.now() + ANOM_TTL); }
+document.addEventListener('qs:flow', (e) => {
+  const f = e.detail;
+  if (f && f.ml && f.ml.is_anomaly) markAnomaly(f.src_ip);
+});
+document.addEventListener('qs:event', (e) => {
+  const ev = e.detail;
+  if (ev && (ev.is_anomaly || ev.blocked)) markAnomaly(ev.attacker_ip || ev.source_ip);
+});
 
 // Cámara: desplazamiento (pan) + escala (zoom). El mundo del grafo se dibuja
 // bajo esta transformación, de modo que mover/acercar es independiente del
@@ -170,6 +198,7 @@ function nodeColor(n) {
 }
 
 function draw() {
+  const now = Date.now();   // para el pulso de las anomalías ML
   // Limpia en espacio de pantalla, luego aplica la cámara (pan + zoom) para
   // dibujar el grafo en coordenadas de mundo.
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -184,14 +213,14 @@ function draw() {
     const shown = !focusNode || e.source === focusNode.id || e.target === focusNode.id;
     ctx.globalAlpha = shown ? 1 : 0.05;
     const threat = b.is_scan_target || a.is_scanner;
-    ctx.strokeStyle = threat ? 'rgba(255,77,109,0.5)' : 'rgba(94,224,214,0.13)';
+    ctx.strokeStyle = threat ? THEME.red + '99' : THEME.cyan + '22';
     ctx.lineWidth = 0.5 + Math.min(5, Math.log2((e.flows || 1) + 1));
     ctx.beginPath();
     ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
     // Punta de flecha (dirección origen -> destino) al 72% del trayecto.
     const ang = Math.atan2(b.y - a.y, b.x - a.x);
     const hx = a.x + (b.x - a.x) * 0.72, hy = a.y + (b.y - a.y) * 0.72;
-    ctx.fillStyle = threat ? 'rgba(255,77,109,0.6)' : 'rgba(94,224,214,0.28)';
+    ctx.fillStyle = threat ? THEME.red + 'aa' : THEME.cyan + '55';
     ctx.beginPath();
     ctx.moveTo(hx, hy);
     ctx.lineTo(hx - 6 * Math.cos(ang - 0.4), hy - 6 * Math.sin(ang - 0.4));
@@ -225,13 +254,23 @@ function draw() {
       ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 7, 0, Math.PI * 2); ctx.stroke();
       ctx.setLineDash([]);
     }
+    // Anomalía detectada por el ML (en vivo): anillo rojo sólido que PULSA.
+    const anomExp = anomUntil.get(n.ip);
+    if (anomExp && anomExp > now) {
+      const pulse = 0.5 + 0.5 * Math.sin(now / 280);
+      ctx.strokeStyle = '#ff2d55';
+      ctx.lineWidth = 2.5;
+      ctx.globalAlpha = (shown ? 1 : 0.08) * (0.5 + 0.5 * pulse);
+      ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 9 + pulse * 4, 0, Math.PI * 2); ctx.stroke();
+      ctx.globalAlpha = shown ? 1 : 0.08;
+    }
     // Resalte en hover.
     if (n === hoverNode) {
-      ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.5;
+      ctx.strokeStyle = THEME.text; ctx.lineWidth = 1.5;
       ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 10, 0, Math.PI * 2); ctx.stroke();
     }
     // Etiqueta: nombre del dispositivo si lo conocemos, si no la IP.
-    ctx.fillStyle = n === hoverNode ? '#d6dee8' : 'rgba(214,222,232,0.6)';
+    ctx.fillStyle = n === hoverNode ? THEME.text : THEME.muted;
     ctx.fillText(n.device_name || n.label || n.ip, n.x, n.y + n.r + 13);
   }
   ctx.globalAlpha = 1;
@@ -305,6 +344,8 @@ function showPanel(n) {
     : `<li class="mp-empty">—</li>`;
   // Insignias: amenazas y criticidad.
   const badges = [];
+  const anomExp = anomUntil.get(n.ip);
+  if (anomExp && anomExp > Date.now()) badges.push(`<span class="mp-badge crit">⚠ anomalía ML reciente</span>`);
   if (n.is_scan_target) badges.push(`<span class="mp-badge warn">◈ objetivo de escaneo (${n.probed_ports || 0} puertos)</span>`);
   if (n.is_scanner) badges.push(`<span class="mp-badge warn">◈ comportamiento de escáner</span>`);
   if (n.criticality) badges.push(`<span class="mp-badge crit">${n.criticality}</span>`);

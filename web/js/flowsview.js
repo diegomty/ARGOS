@@ -37,16 +37,26 @@ function fmtTime(t) {
 }
 function esc(s) { return String(s).replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 function svc(f) { return (PORTS[f.dst_port] || f.protocol || '?') + ' :' + f.dst_port; }
+function pill(cls, text) { return `<span class="det ${cls}">${esc(text)}</span>`; }
+
+// Veredicto ML explicable (mismas píldoras que Anomalías): dice QUÉ modelo marcó.
+function mlCell(ml) {
+  if (!ml) return '<span class="badge-ok">—</span>';          // histórico sin veredicto persistido
+  if (!ml.is_anomaly) return '<span class="badge-ok">ok</span>';
+  const inh = ml.inherited, loc = ml.local;
+  let b = '';
+  if (inh && inh.is_attack) b += pill('det-inherited', `RF ${Math.round((inh.confidence || 0) * 100)}%`);
+  if (loc && loc.is_anomaly) {
+    const s = Number(loc.score);
+    b += pill('det-local', `IsoForest ${isFinite(s) ? (s >= 0 ? '+' : '') + s.toFixed(2) : '?'}`);
+  }
+  return b || pill('det-rule', 'anómalo');
+}
 
 function rowHtml(f) {
   const t = f.received_at ? f.received_at * 1000 : (f._t || Date.now());
   const anom = f.ml && f.ml.is_anomaly;
-  let ml = '<span class="badge-ok">—</span>';
-  if (f.ml) {
-    ml = anom
-      ? `<span class="badge-anom">${esc(f.ml.detectors.join(', ') || 'anómalo')}</span>`
-      : '<span class="badge-ok">ok</span>';
-  }
+  const ml = mlCell(f.ml);
   return `<tr class="${anom ? 'flow-anom' : ''}">`
     + `<td class="mono muted">${fmtTime(t)}</td>`
     + `<td class="mono">${esc(f.src_ip)}:${f.src_port}</td>`
